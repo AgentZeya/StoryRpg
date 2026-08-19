@@ -1,10 +1,12 @@
 -- ==========================================
--- STORY RPG — CUSTOM BLACK UI (Rayfield Removed)
+-- STORY RPG — CUSTOM BLACK UI (Enhanced Version)
+-- ✓ New "Sell & Buy" tab with auto sell, auto buy guards, auto potion
+-- ✓ Skill 3 added to auto skills
 -- ✓ Same farm/attack/skill/safezone logic as before
 -- ✓ Multi-select mobs preserved (click to toggle)
--- ✓ Custom black GUI (from Script 2 layout), white text
+-- ✓ Custom black GUI, white text
 -- ✓ Scaled to ~90% size
--- ✓ Custom key-check screen replaces Rayfield KeySystem
+-- ✓ Custom key-check screen
 -- ==========================================
 local unpack = unpack or table.unpack
 
@@ -20,6 +22,9 @@ local LocalPlayer = Players.LocalPlayer
 local remotesFolder = ReplicatedStorage:WaitForChild("Remotes", 5)
 local requestAttackRemote = remotesFolder and remotesFolder:WaitForChild("RequestAttack", 5)
 local skillCastRemote = remotesFolder and remotesFolder:WaitForChild("SkillCast", 5)
+local sellBulkRemote = remotesFolder and remotesFolder:WaitForChild("SellBulk", 5)
+local requestBuyRemote = remotesFolder and remotesFolder:WaitForChild("RequestBuy", 5)
+local requestUsePotionRemote = remotesFolder and remotesFolder:WaitForChild("RequestUsePotion", 5)
 
 if not remotesFolder then warn("[StoryRPG] Remotes folder not found!") end
 if not requestAttackRemote then warn("[StoryRPG] RequestAttack remote not found!") end
@@ -35,6 +40,11 @@ local walkspeedActive = false
 local walkspeedValue = 30
 local farmDistance = 5
 local safeZonePercent = 20
+
+-- Sell & Buy Tab State
+local autoSellItems = false
+local autoBuyGuards = false
+local autoPotion = false
 
 local selectedMobNames = {}   -- multi-select, empty = farm any mob
 local currentTargetMob = nil
@@ -121,7 +131,7 @@ local function toggleMobSelection(mobName)
 end
 
 -- ==========================================
--- BACKGROUND LOOPS (unchanged logic)
+-- BACKGROUND LOOPS
 -- ==========================================
 
 -- Anti-AFK
@@ -170,7 +180,7 @@ task.spawn(function()
 	end
 end)
 
--- Auto Skills
+-- Auto Skills (now includes Skill 3)
 task.spawn(function()
 	while true do
 		if autoSkills and skillCastRemote then
@@ -178,21 +188,96 @@ task.spawn(function()
 			local hrp = getHRP(char)
 			local dir = hrp and hrp.CFrame.LookVector or Vector3.new(0, 0, -1)
 
+			-- Skill 1
 			pcall(function()
 				local args1 = {[1] = 1, [2] = dir, n = 2}
 				skillCastRemote:InvokeServer(unpack(args1, 1, args1.n))
 			end)
 			task.wait(0.8)
 
+			-- Skill 2
 			if autoSkills then
 				pcall(function()
 					local args2 = {[1] = 2, [2] = dir, n = 2}
 					skillCastRemote:InvokeServer(unpack(args2, 1, args2.n))
 				end)
 			end
+			task.wait(0.8)
+
+			-- Skill 3
+			if autoSkills then
+				pcall(function()
+					local args3 = {[1] = 3, [2] = dir, n = 2}
+					skillCastRemote:InvokeServer(unpack(args3, 1, args3.n))
+				end)
+			end
 			task.wait(1.2)
 		else
 			task.wait(0.5)
+		end
+	end
+end)
+
+-- Auto Sell Items
+task.spawn(function()
+	while true do
+		if autoSellItems and sellBulkRemote then
+			pcall(function()
+				local args = {
+					{
+						items = {
+							{id = "Stone", count = 99},
+							{id = "MudBall", count = 99},
+							{id = "Carrot", count = 99},
+							{id = "Rope", count = 99},
+							{id = "Branch", count = 99}
+						},
+						weapons = {}
+					}
+				}
+				sellBulkRemote:InvokeServer(unpack(args))
+			end)
+			task.wait(5)
+		else
+			task.wait(1)
+		end
+	end
+end)
+
+-- Auto Buy Guards
+task.spawn(function()
+	while true do
+		if autoBuyGuards and requestBuyRemote then
+			pcall(function()
+				local args1 = {"EnhProtect", 1}
+				requestBuyRemote:FireServer(unpack(args1))
+			end)
+			task.wait(0.5)
+			pcall(function()
+				local args2 = {"EnhNoDown", 1}
+				requestBuyRemote:FireServer(unpack(args2))
+			end)
+			task.wait(10)
+		else
+			task.wait(1)
+		end
+	end
+end)
+
+-- Auto Potion (Health and Mana)
+task.spawn(function()
+	while true do
+		if autoPotion and requestUsePotionRemote then
+			pcall(function()
+				requestUsePotionRemote:InvokeServer("HpM")
+			end)
+			task.wait(0.3)
+			pcall(function()
+				requestUsePotionRemote:InvokeServer("MpS")
+			end)
+			task.wait(5)
+		else
+			task.wait(1)
 		end
 	end
 end)
@@ -465,10 +550,80 @@ buildMainUI = function()
 	roundCorner(HideBtn, 5)
 	addStroke(HideBtn, COLOR_STROKE_OFF, 1)
 
+	-- Tab System
+	local TabContainer = Instance.new("Frame")
+	TabContainer.Size = UDim2.new(1, -18, 0, 25)
+	TabContainer.Position = UDim2.new(0, 9, 0, 32)
+	TabContainer.BackgroundTransparency = 1
+	TabContainer.Parent = MainFrame
+
+	local FarmTab = Instance.new("TextButton")
+	FarmTab.Size = UDim2.new(0.5, -2, 1, 0)
+	FarmTab.Position = UDim2.new(0, 0, 0, 0)
+	FarmTab.BackgroundColor3 = COLOR_PANEL_ALT
+	FarmTab.Text = "FARM"
+	FarmTab.TextColor3 = COLOR_TEXT
+	FarmTab.Font = Enum.Font.GothamBold
+	FarmTab.TextSize = 9
+	FarmTab.Parent = TabContainer
+	roundCorner(FarmTab, 5)
+	local FarmTabStroke = addStroke(FarmTab, COLOR_STROKE_ON, 1.5)
+
+	local SellBuyTab = Instance.new("TextButton")
+	SellBuyTab.Size = UDim2.new(0.5, -2, 1, 0)
+	SellBuyTab.Position = UDim2.new(0.5, 2, 0, 0)
+	SellBuyTab.BackgroundColor3 = COLOR_PANEL
+	SellBuyTab.Text = "SELL & BUY"
+	SellBuyTab.TextColor3 = COLOR_TEXT
+	SellBuyTab.Font = Enum.Font.GothamBold
+	SellBuyTab.TextSize = 9
+	SellBuyTab.Parent = TabContainer
+	roundCorner(SellBuyTab, 5)
+	local SellBuyTabStroke = addStroke(SellBuyTab, COLOR_STROKE_OFF, 1)
+
+	-- Content Frames
+	local FarmContent = Instance.new("Frame")
+	FarmContent.Size = UDim2.new(1, 0, 1, -61)
+	FarmContent.Position = UDim2.new(0, 0, 0, 61)
+	FarmContent.BackgroundTransparency = 1
+	FarmContent.Visible = true
+	FarmContent.Parent = MainFrame
+
+	local SellBuyContent = Instance.new("Frame")
+	SellBuyContent.Size = UDim2.new(1, 0, 1, -61)
+	SellBuyContent.Position = UDim2.new(0, 0, 0, 61)
+	SellBuyContent.BackgroundTransparency = 1
+	SellBuyContent.Visible = false
+	SellBuyContent.Parent = MainFrame
+
+	-- Tab switching
+	FarmTab.MouseButton1Click:Connect(function()
+		FarmContent.Visible = true
+		SellBuyContent.Visible = false
+		FarmTab.BackgroundColor3 = COLOR_PANEL_ALT
+		SellBuyTab.BackgroundColor3 = COLOR_PANEL
+		FarmTabStroke.Color = COLOR_STROKE_ON
+		FarmTabStroke.Thickness = 1.5
+		SellBuyTabStroke.Color = COLOR_STROKE_OFF
+		SellBuyTabStroke.Thickness = 1
+	end)
+
+	SellBuyTab.MouseButton1Click:Connect(function()
+		FarmContent.Visible = false
+		SellBuyContent.Visible = true
+		FarmTab.BackgroundColor3 = COLOR_PANEL
+		SellBuyTab.BackgroundColor3 = COLOR_PANEL_ALT
+		FarmTabStroke.Color = COLOR_STROKE_OFF
+		FarmTabStroke.Thickness = 1
+		SellBuyTabStroke.Color = COLOR_STROKE_ON
+		SellBuyTabStroke.Thickness = 1.5
+	end)
+
+	-- ===== FARM TAB CONTENT =====
 	-- Search Box
 	local SearchBox = Instance.new("TextBox")
 	SearchBox.Size = UDim2.new(1, -18, 0, 23)
-	SearchBox.Position = UDim2.new(0, 9, 0, 32)
+	SearchBox.Position = UDim2.new(0, 9, 0, 0)
 	SearchBox.BackgroundColor3 = COLOR_PANEL
 	SearchBox.PlaceholderText = "Search Mobs..."
 	SearchBox.Text = ""
@@ -476,19 +631,19 @@ buildMainUI = function()
 	SearchBox.PlaceholderColor3 = Color3.fromRGB(130, 130, 130)
 	SearchBox.Font = Enum.Font.GothamMedium
 	SearchBox.TextSize = 9
-	SearchBox.Parent = MainFrame
+	SearchBox.Parent = FarmContent
 	roundCorner(SearchBox, 5)
 	addStroke(SearchBox, COLOR_STROKE_OFF, 1)
 
 	-- Mob List Scroller
 	local Scroller = Instance.new("ScrollingFrame")
 	Scroller.Size = UDim2.new(1, -18, 0, 99)
-	Scroller.Position = UDim2.new(0, 9, 0, 61)
+	Scroller.Position = UDim2.new(0, 9, 0, 29)
 	Scroller.BackgroundColor3 = COLOR_PANEL
 	Scroller.ScrollBarThickness = 3
 	Scroller.CanvasSize = UDim2.new(0, 0, 0, 0)
 	Scroller.AutomaticCanvasSize = Enum.AutomaticSize.Y
-	Scroller.Parent = MainFrame
+	Scroller.Parent = FarmContent
 	roundCorner(Scroller, 5)
 	addStroke(Scroller, COLOR_STROKE_OFF, 1)
 
@@ -507,71 +662,71 @@ buildMainUI = function()
 	-- Row 1: Start & Stop Farm
 	local StartBtn = Instance.new("TextButton")
 	StartBtn.Size = UDim2.new(0.5, -12, 0, 25)
-	StartBtn.Position = UDim2.new(0, 9, 0, 167)
+	StartBtn.Position = UDim2.new(0, 9, 0, 135)
 	StartBtn.BackgroundColor3 = COLOR_PANEL
 	StartBtn.Text = "START FARM"
 	StartBtn.TextColor3 = COLOR_TEXT
 	StartBtn.Font = Enum.Font.GothamBold
 	StartBtn.TextSize = 8
-	StartBtn.Parent = MainFrame
+	StartBtn.Parent = FarmContent
 	roundCorner(StartBtn, 5)
 	addStroke(StartBtn, COLOR_STROKE_OFF, 1)
 
 	local StopBtn = Instance.new("TextButton")
 	StopBtn.Size = UDim2.new(0.5, -12, 0, 25)
-	StopBtn.Position = UDim2.new(0.5, 3, 0, 167)
+	StopBtn.Position = UDim2.new(0.5, 3, 0, 135)
 	StopBtn.BackgroundColor3 = COLOR_PANEL
 	StopBtn.Text = "STOP FARM"
 	StopBtn.TextColor3 = COLOR_TEXT
 	StopBtn.Font = Enum.Font.GothamBold
 	StopBtn.TextSize = 8
-	StopBtn.Parent = MainFrame
+	StopBtn.Parent = FarmContent
 	roundCorner(StopBtn, 5)
 	addStroke(StopBtn, COLOR_STROKE_OFF, 1)
 
 	-- Row 2: Auto Attack & Auto Skills
 	local AtkBtn = Instance.new("TextButton")
 	AtkBtn.Size = UDim2.new(0.5, -12, 0, 25)
-	AtkBtn.Position = UDim2.new(0, 9, 0, 196)
+	AtkBtn.Position = UDim2.new(0, 9, 0, 164)
 	AtkBtn.BackgroundColor3 = COLOR_PANEL
 	AtkBtn.Text = "AUTO ATTACK: OFF"
 	AtkBtn.TextColor3 = COLOR_TEXT
 	AtkBtn.Font = Enum.Font.GothamBold
 	AtkBtn.TextSize = 8
-	AtkBtn.Parent = MainFrame
+	AtkBtn.Parent = FarmContent
 	roundCorner(AtkBtn, 5)
 	local AtkStroke = addStroke(AtkBtn, COLOR_STROKE_OFF, 1)
 
 	local SkillBtn = Instance.new("TextButton")
 	SkillBtn.Size = UDim2.new(0.5, -12, 0, 25)
-	SkillBtn.Position = UDim2.new(0.5, 3, 0, 196)
+	SkillBtn.Position = UDim2.new(0.5, 3, 0, 164)
 	SkillBtn.BackgroundColor3 = COLOR_PANEL
 	SkillBtn.Text = "AUTO SKILLS: OFF"
 	SkillBtn.TextColor3 = COLOR_TEXT
 	SkillBtn.Font = Enum.Font.GothamBold
 	SkillBtn.TextSize = 8
-	SkillBtn.Parent = MainFrame
+	SkillBtn.Parent = FarmContent
 	roundCorner(SkillBtn, 5)
 	local SkillStroke = addStroke(SkillBtn, COLOR_STROKE_OFF, 1)
 
 	-- Row 3: Auto Safe Zone & Safe Zone % Input
 	local SafeBtn = Instance.new("TextButton")
 	SafeBtn.Size = UDim2.new(0.5, -12, 0, 25)
-	SafeBtn.Position = UDim2.new(0, 9, 0, 226)
+	SafeBtn.Position = UDim2.new(0, 9, 0, 194)
 	SafeBtn.BackgroundColor3 = COLOR_PANEL
 	SafeBtn.Text = "SAFE ZONE: OFF"
 	SafeBtn.TextColor3 = COLOR_TEXT
 	SafeBtn.Font = Enum.Font.GothamBold
 	SafeBtn.TextSize = 8
-	SafeBtn.Parent = MainFrame
+	SafeBtn.Parent = FarmContent
 	roundCorner(SafeBtn, 5)
 	local SafeStroke = addStroke(SafeBtn, COLOR_STROKE_OFF, 1)
 
 	local SafeHpFrame = Instance.new("Frame")
 	SafeHpFrame.Size = UDim2.new(0.5, -12, 0, 25)
-	SafeHpFrame.Position = UDim2.new(0.5, 3, 0, 226)
+	SafeHpFrame.Position = UDim2.new(0.5, 3, 0, 194)
 	SafeHpFrame.BackgroundColor3 = COLOR_PANEL
-	SafeHpFrame.Parent = MainFrame
+	SafeHpFrame.Parent = FarmContent
 	roundCorner(SafeHpFrame, 5)
 	addStroke(SafeHpFrame, COLOR_STROKE_OFF, 1)
 
@@ -601,9 +756,9 @@ buildMainUI = function()
 	-- Row 4: Farm Distance & Walkspeed Toggle
 	local DistFrame = Instance.new("Frame")
 	DistFrame.Size = UDim2.new(0.5, -12, 0, 25)
-	DistFrame.Position = UDim2.new(0, 9, 0, 256)
+	DistFrame.Position = UDim2.new(0, 9, 0, 224)
 	DistFrame.BackgroundColor3 = COLOR_PANEL
-	DistFrame.Parent = MainFrame
+	DistFrame.Parent = FarmContent
 	roundCorner(DistFrame, 5)
 	addStroke(DistFrame, COLOR_STROKE_OFF, 1)
 
@@ -632,42 +787,103 @@ buildMainUI = function()
 
 	local SpeedBtn = Instance.new("TextButton")
 	SpeedBtn.Size = UDim2.new(0.5, -12, 0, 25)
-	SpeedBtn.Position = UDim2.new(0.5, 3, 0, 256)
+	SpeedBtn.Position = UDim2.new(0.5, 3, 0, 224)
 	SpeedBtn.BackgroundColor3 = COLOR_PANEL
 	SpeedBtn.Text = "WALKSPEED: OFF"
 	SpeedBtn.TextColor3 = COLOR_TEXT
 	SpeedBtn.Font = Enum.Font.GothamBold
 	SpeedBtn.TextSize = 8
-	SpeedBtn.Parent = MainFrame
+	SpeedBtn.Parent = FarmContent
 	roundCorner(SpeedBtn, 5)
 	local SpeedStroke = addStroke(SpeedBtn, COLOR_STROKE_OFF, 1)
 
 	-- Row 5: Anti-AFK Text
 	local AfkText = Instance.new("TextLabel")
 	AfkText.Size = UDim2.new(1, -18, 0, 22)
-	AfkText.Position = UDim2.new(0, 9, 0, 285)
+	AfkText.Position = UDim2.new(0, 9, 0, 253)
 	AfkText.BackgroundColor3 = COLOR_PANEL
 	AfkText.Text = "ANTI-AFK: ACTIVE"
 	AfkText.TextColor3 = COLOR_TEXT
 	AfkText.Font = Enum.Font.GothamBold
 	AfkText.TextSize = 8
-	AfkText.Parent = MainFrame
+	AfkText.Parent = FarmContent
 	roundCorner(AfkText, 5)
 	addStroke(AfkText, COLOR_STROKE_OFF, 1)
 
 	-- Status Text
 	local StatusText = Instance.new("TextLabel")
 	StatusText.Size = UDim2.new(1, -18, 0, 43)
-	StatusText.Position = UDim2.new(0, 9, 0, 311)
+	StatusText.Position = UDim2.new(0, 9, 0, 279)
 	StatusText.BackgroundColor3 = COLOR_PANEL
 	StatusText.Text = "Status: Idle (Select Mob)"
 	StatusText.TextColor3 = COLOR_TEXT
 	StatusText.Font = Enum.Font.GothamBold
 	StatusText.TextSize = 8
 	StatusText.TextWrapped = true
-	StatusText.Parent = MainFrame
+	StatusText.Parent = FarmContent
 	roundCorner(StatusText, 5)
 	addStroke(StatusText, COLOR_STROKE_OFF, 1)
+
+	-- ===== SELL & BUY TAB CONTENT =====
+	-- Auto Sell Items
+	local SellItemsBtn = Instance.new("TextButton")
+	SellItemsBtn.Size = UDim2.new(1, -18, 0, 30)
+	SellItemsBtn.Position = UDim2.new(0, 9, 0, 10)
+	SellItemsBtn.BackgroundColor3 = COLOR_PANEL
+	SellItemsBtn.Text = "AUTO SELL ITEMS: OFF"
+	SellItemsBtn.TextColor3 = COLOR_TEXT
+	SellItemsBtn.Font = Enum.Font.GothamBold
+	SellItemsBtn.TextSize = 9
+	SellItemsBtn.Parent = SellBuyContent
+	roundCorner(SellItemsBtn, 5)
+	local SellItemsStroke = addStroke(SellItemsBtn, COLOR_STROKE_OFF, 1)
+
+	-- Auto Buy Guards
+	local BuyGuardsBtn = Instance.new("TextButton")
+	BuyGuardsBtn.Size = UDim2.new(1, -18, 0, 30)
+	BuyGuardsBtn.Position = UDim2.new(0, 9, 0, 50)
+	BuyGuardsBtn.BackgroundColor3 = COLOR_PANEL
+	BuyGuardsBtn.Text = "AUTO BUY GUARDS: OFF"
+	BuyGuardsBtn.TextColor3 = COLOR_TEXT
+	BuyGuardsBtn.Font = Enum.Font.GothamBold
+	BuyGuardsBtn.TextSize = 9
+	BuyGuardsBtn.Parent = SellBuyContent
+	roundCorner(BuyGuardsBtn, 5)
+	local BuyGuardsStroke = addStroke(BuyGuardsBtn, COLOR_STROKE_OFF, 1)
+
+	-- Auto Potion
+	local PotionBtn = Instance.new("TextButton")
+	PotionBtn.Size = UDim2.new(1, -18, 0, 30)
+	PotionBtn.Position = UDim2.new(0, 9, 0, 90)
+	PotionBtn.BackgroundColor3 = COLOR_PANEL
+	PotionBtn.Text = "AUTO POTION: OFF"
+	PotionBtn.TextColor3 = COLOR_TEXT
+	PotionBtn.Font = Enum.Font.GothamBold
+	PotionBtn.TextSize = 9
+	PotionBtn.Parent = SellBuyContent
+	roundCorner(PotionBtn, 5)
+	local PotionStroke = addStroke(PotionBtn, COLOR_STROKE_OFF, 1)
+
+	-- Info Text
+	local InfoText = Instance.new("TextLabel")
+	InfoText.Size = UDim2.new(1, -18, 0, 180)
+	InfoText.Position = UDim2.new(0, 9, 0, 135)
+	InfoText.BackgroundColor3 = COLOR_PANEL
+	InfoText.Text = "AUTO SELL ITEMS:\nSells Stone, MudBall, Carrot, Rope, Branch\n\nAUTO BUY GUARDS:\nBuys EnhProtect & EnhNoDown\n\nAUTO POTION:\nUses HpM (Health) & MpS (Mana) potions"
+	InfoText.TextColor3 = COLOR_TEXT_DIM
+	InfoText.Font = Enum.Font.Gotham
+	InfoText.TextSize = 8
+	InfoText.TextWrapped = true
+	InfoText.TextYAlignment = Enum.TextYAlignment.Top
+	InfoText.Parent = SellBuyContent
+	roundCorner(InfoText, 5)
+	addStroke(InfoText, COLOR_STROKE_OFF, 1)
+
+	local InfoPadding = Instance.new("UIPadding")
+	InfoPadding.PaddingTop = UDim.new(0, 8)
+	InfoPadding.PaddingLeft = UDim.new(0, 8)
+	InfoPadding.PaddingRight = UDim.new(0, 8)
+	InfoPadding.Parent = InfoText
 
 	-- Status Updates
 	task.spawn(function()
@@ -681,7 +897,7 @@ buildMainUI = function()
 		end
 	end)
 
-	-- UI LISTENERS
+	-- ===== UI LISTENERS =====
 	OpenToggleButton.MouseButton1Click:Connect(function()
 		MainFrame.Visible = not MainFrame.Visible
 	end)
@@ -696,6 +912,7 @@ buildMainUI = function()
 		end
 	end)
 
+	-- Farm Tab Buttons
 	AtkBtn.MouseButton1Click:Connect(function()
 		autoAttack = not autoAttack
 		AtkBtn.Text = autoAttack and "AUTO ATTACK: ON" or "AUTO ATTACK: OFF"
@@ -769,6 +986,28 @@ buildMainUI = function()
 		isFarming = false
 		currentTargetMob = nil
 		StatusText.Text = "Status: Farming Stopped"
+	end)
+
+	-- Sell & Buy Tab Buttons
+	SellItemsBtn.MouseButton1Click:Connect(function()
+		autoSellItems = not autoSellItems
+		SellItemsBtn.Text = autoSellItems and "AUTO SELL ITEMS: ON" or "AUTO SELL ITEMS: OFF"
+		SellItemsStroke.Color = autoSellItems and COLOR_STROKE_ON or COLOR_STROKE_OFF
+		SellItemsBtn.BackgroundColor3 = autoSellItems and COLOR_PANEL_ALT or COLOR_PANEL
+	end)
+
+	BuyGuardsBtn.MouseButton1Click:Connect(function()
+		autoBuyGuards = not autoBuyGuards
+		BuyGuardsBtn.Text = autoBuyGuards and "AUTO BUY GUARDS: ON" or "AUTO BUY GUARDS: OFF"
+		BuyGuardsStroke.Color = autoBuyGuards and COLOR_STROKE_ON or COLOR_STROKE_OFF
+		BuyGuardsBtn.BackgroundColor3 = autoBuyGuards and COLOR_PANEL_ALT or COLOR_PANEL
+	end)
+
+	PotionBtn.MouseButton1Click:Connect(function()
+		autoPotion = not autoPotion
+		PotionBtn.Text = autoPotion and "AUTO POTION: ON" or "AUTO POTION: OFF"
+		PotionStroke.Color = autoPotion and COLOR_STROKE_ON or COLOR_STROKE_OFF
+		PotionBtn.BackgroundColor3 = autoPotion and COLOR_PANEL_ALT or COLOR_PANEL
 	end)
 
 	-- MOB LIST POPULATION (multi-select)
