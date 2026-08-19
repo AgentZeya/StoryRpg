@@ -226,8 +226,8 @@ task.spawn(function()
 				local args = {
 					{
 						items = {
-							{id = "Stone", count = 99},
-							{id = "MudBall", count = 99},
+							{id = "Stone", count = 300},
+							{id = "MudBall", count = 300},
 							{id = "Carrot", count = 99},
 							{id = "Rope", count = 99},
 							{id = "Branch", count = 99}
@@ -275,7 +275,7 @@ task.spawn(function()
 			pcall(function()
 				requestUsePotionRemote:InvokeServer("MpS")
 			end)
-			task.wait(5)
+			task.wait(2)
 		else
 			task.wait(1)
 		end
