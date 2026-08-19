@@ -1,0 +1,1177 @@
+-- ==========================================
+-- STORY RPG — CUSTOM BLACK UI (Enhanced v3)
+-- ✓ Auto Sell reads REAL inventory (ClientState + InventoryUtil) — skips items you don't own
+-- ✓ Auto Potion auto-detects owned tier (HpL/HpM/HpS, MpL/MpM/MpS)
+-- ✓ Dual key: "eyaganda" (session only) / "haniluvseya143" (permanent, saved)
+-- ✓ Skills 1, 2, 3
+-- ✓ Multi-select mobs, black UI, ~90% scale
+-- ==========================================
+local unpack = unpack or table.unpack
+
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local VirtualUser = game:GetService("VirtualUser")
+local LocalPlayer = Players.LocalPlayer
+
+-- Remotes
+local remotesFolder = ReplicatedStorage:WaitForChild("Remotes", 5)
+local requestAttackRemote = remotesFolder and remotesFolder:WaitForChild("RequestAttack", 5)
+local skillCastRemote = remotesFolder and remotesFolder:WaitForChild("SkillCast", 5)
+local sellBulkRemote = remotesFolder and remotesFolder:WaitForChild("SellBulk", 5)
+local requestBuyRemote = remotesFolder and remotesFolder:WaitForChild("RequestBuy", 5)
+local requestUsePotionRemote = remotesFolder and remotesFolder:WaitForChild("RequestUsePotion", 5)
+
+if not remotesFolder then warn("[StoryRPG] Remotes folder not found!") end
+if not requestAttackRemote then warn("[StoryRPG] RequestAttack remote not found!") end
+if not skillCastRemote then warn("[StoryRPG] SkillCast remote not found!") end
+
+-- State
+local isFarming = false
+local autoAttack = false
+local autoSkills = false
+local autoSafeZone = false
+local isHealingInSafeZone = false
+local walkspeedActive = false
+local walkspeedValue = 30
+local farmDistance = 5
+local safeZonePercent = 20
+
+-- Sell & Buy Tab State
+local autoSellItems = false
+local autoBuyGuards = false
+local autoPotion = false
+
+local selectedMobNames = {}
+local currentTargetMob = nil
+
+-- ==========================================
+-- 🔑 KEY SYSTEM CONFIG
+-- ==========================================
+local VALID_KEY = "eyaganda"           -- session only, asks again next time
+local PERMANENT_KEY = "haniluvseya143" -- permanent, never asks again
+local KEY_SAVE_FILE = "StoryRPG_KeySaved.txt"
+
+local WHITELISTED_USERIDS = {
+	1786667991123, -- verify with: print(game.Players.LocalPlayer.UserId)
+}
+
+local function isWhitelisted()
+	for _, id in ipairs(WHITELISTED_USERIDS) do
+		if LocalPlayer.UserId == id then
+			return true
+		end
+	end
+	return false
+end
+
+local function hasPermanentAccess()
+	local ok, result = pcall(function()
+		if isfile and isfile(KEY_SAVE_FILE) then
+			return readfile(KEY_SAVE_FILE) == "UNLOCKED"
+		end
+		return false
+	end)
+	return ok and result
+end
+
+local function savePermanentAccess()
+	pcall(function()
+		if writefile then
+			writefile(KEY_SAVE_FILE, "UNLOCKED")
+		end
+	end)
+end
+
+local bypassKey = isWhitelisted() or hasPermanentAccess()
+
+-- ==========================================
+-- HELPER FUNCTIONS
+-- ==========================================
+local function getBaseName(name)
+	local base = string.gsub(name, "%d+$", "")
+	base = string.gsub(base, "_+$", "")
+	return base
+end
+
+local function getHRP(model)
+	if not model then return nil end
+	return model:FindFirstChild("HumanoidRootPart") or model:FindFirstChild("Torso") or model:FindFirstChild("UpperTorso") or model.PrimaryPart
+end
+
+local function getSafeZoneBasePart()
+	local hz = Workspace:FindFirstChild("HealthZones")
+	if not hz then return nil end
+	for _, desc in ipairs(hz:GetDescendants()) do
+		if desc:IsA("BasePart") then
+			if desc.Name == "default" or desc.Name == "Circle" or (desc.Parent and desc.Parent.Name == "Platform") then
+				return desc
+			end
+		end
+	end
+	return hz:FindFirstChildWhichIsA("BasePart", true)
+end
+
+local function getMobFolders()
+	local folders = {}
+	local runtime = Workspace:FindFirstChild("_Runtime")
+	if runtime then
+		local boss = runtime:FindFirstChild("Boss")
+		local monsters = runtime:FindFirstChild("Monsters")
+		if boss then table.insert(folders, boss) end
+		if monsters then table.insert(folders, monsters) end
+	end
+	return folders
+end
+
+local function isMobSelected(name)
+	local baseName = getBaseName(name)
+	if #selectedMobNames == 0 then
+		return true
+	end
+	for _, selectedName in ipairs(selectedMobNames) do
+		if baseName:lower() == selectedName:lower() then
+			return true
+		end
+	end
+	return false
+end
+
+local function toggleMobSelection(mobName)
+	for i, name in ipairs(selectedMobNames) do
+		if name:lower() == mobName:lower() then
+			table.remove(selectedMobNames, i)
+			return
+		end
+	end
+	table.insert(selectedMobNames, mobName)
+end
+
+-- ==========================================
+-- 🎒 INVENTORY HELPERS (real ClientState + InventoryUtil)
+-- ==========================================
+local ClientStateModule, InventoryUtilModule
+
+pcall(function()
+	ClientStateModule = require(LocalPlayer.PlayerScripts.Controllers.ClientState)
+end)
+pcall(function()
+	InventoryUtilModule = require(ReplicatedStorage.Shared.InventoryUtil)
+end)
+
+local function getPlayerState()
+	if not ClientStateModule then return nil end
+	local ok, state = pcall(function()
+		return ClientStateModule.Get()
+	end)
+	if ok then return state end
+	return nil
+end
+
+-- Sellable count = Inventory.Materials only (exactly what SellBulk consumes)
+local function getSellableCount(itemId)
+	local state = getPlayerState()
+	if not state or not state.Inventory then return nil end
+
+	if InventoryUtilModule and InventoryUtilModule.GetSellableCount then
+		local ok, count = pcall(function()
+			return InventoryUtilModule.GetSellableCount(state, itemId)
+		end)
+		if ok then return count or 0 end
+	end
+
+	local mats = state.Inventory.Materials
+	return mats and (mats[itemId] or 0) or 0
+end
+
+-- Potion count from Inventory.Potions
+local function getPotionCount(potionId)
+	local state = getPlayerState()
+	if not state or not state.Inventory then return nil end
+
+	local potions = state.Inventory.Potions
+	return potions and (potions[potionId] or 0) or 0
+end
+
+-- ==========================================
+-- BACKGROUND LOOPS
+-- ==========================================
+
+-- Anti-AFK
+LocalPlayer.Idled:Connect(function()
+	VirtualUser:CaptureController()
+	VirtualUser:ClickTime2Now()
+end)
+
+-- Walkspeed
+RunService.RenderStepped:Connect(function()
+	if walkspeedActive then
+		local char = LocalPlayer.Character
+		if char then
+			local hum = char:FindFirstChildOfClass("Humanoid")
+			if hum then hum.WalkSpeed = walkspeedValue end
+		end
+	end
+end)
+
+-- Noclip
+RunService.Stepped:Connect(function()
+	if isFarming or isHealingInSafeZone then
+		local char = LocalPlayer.Character
+		if char then
+			for _, part in ipairs(char:GetDescendants()) do
+				if part:IsA("BasePart") then
+					part.CanCollide = false
+				end
+			end
+		end
+	end
+end)
+
+-- Auto Attack
+task.spawn(function()
+	while true do
+		if autoAttack and requestAttackRemote then
+			pcall(function()
+				local args = {[1] = 1, n = 1}
+				requestAttackRemote:FireServer(unpack(args, 1, args.n))
+			end)
+			task.wait(0.15)
+		else
+			task.wait(0.5)
+		end
+	end
+end)
+
+-- Auto Skills (1, 2, 3)
+task.spawn(function()
+	while true do
+		if autoSkills and skillCastRemote then
+			local char = LocalPlayer.Character
+			local hrp = getHRP(char)
+			local dir = hrp and hrp.CFrame.LookVector or Vector3.new(0, 0, -1)
+
+			pcall(function()
+				local args1 = {[1] = 1, [2] = dir, n = 2}
+				skillCastRemote:InvokeServer(unpack(args1, 1, args1.n))
+			end)
+			task.wait(0.8)
+
+			if autoSkills then
+				pcall(function()
+					local args2 = {[1] = 2, [2] = dir, n = 2}
+					skillCastRemote:InvokeServer(unpack(args2, 1, args2.n))
+				end)
+			end
+			task.wait(0.8)
+
+			if autoSkills then
+				pcall(function()
+					local args3 = {[1] = 3, [2] = dir, n = 2}
+					skillCastRemote:InvokeServer(unpack(args3, 1, args3.n))
+				end)
+			end
+			task.wait(1.2)
+		else
+			task.wait(0.5)
+		end
+	end
+end)
+
+-- ===== AUTO SELL (inventory-aware) =====
+local SELLABLE_ITEMS = {
+	"Stone", "MudBall", "Carrot", "Rope", "Branch",
+	-- extras available in this game (uncomment to also sell them):
+	-- "GoldenCarrot", "StrawKnot", "MudCore", "WoodGnarl", "FireBrick", "WolfClaw",
+}
+
+local function buildSellItemsList()
+	local list = {}
+	for _, itemId in ipairs(SELLABLE_ITEMS) do
+		local count = getSellableCount(itemId)
+		if count == nil then
+			-- state unreadable -> fall back to blind attempt
+			table.insert(list, {id = itemId, count = 99})
+		elseif count > 0 then
+			table.insert(list, {id = itemId, count = math.min(count, 99)})
+		end
+		-- count == 0 -> skipped (you don't own it)
+	end
+	return list
+end
+
+task.spawn(function()
+	while true do
+		if autoSellItems and sellBulkRemote then
+			local itemsToSell = buildSellItemsList()
+			if #itemsToSell > 0 then
+				pcall(function()
+					local args = {
+						{
+							items = itemsToSell,
+							weapons = {}
+						}
+					}
+					sellBulkRemote:InvokeServer(unpack(args))
+				end)
+			end
+			task.wait(0.7)
+		else
+			task.wait(1)
+		end
+	end
+end)
+
+-- Auto Buy Guards
+task.spawn(function()
+	while true do
+		if autoBuyGuards and requestBuyRemote then
+			pcall(function()
+				local args1 = {"EnhProtect", 1}
+				requestBuyRemote:FireServer(unpack(args1))
+			end)
+			task.wait(0.5)
+			pcall(function()
+				local args2 = {"EnhNoDown", 1}
+				requestBuyRemote:FireServer(unpack(args2))
+			end)
+			task.wait(10)
+		else
+			task.wait(1)
+		end
+	end
+end)
+
+-- ===== AUTO POTION (auto-detects owned tier) =====
+local HP_POTION_PRIORITY = {"HpL", "HpM", "HpS"}
+local MP_POTION_PRIORITY = {"MpL", "MpM", "MpS"}
+
+local function findUsablePotion(priorityList)
+	for _, potionId in ipairs(priorityList) do
+		local count = getPotionCount(potionId)
+		if count == nil then
+			return priorityList[1] -- state unreadable -> try top priority
+		elseif count > 0 then
+			return potionId
+		end
+	end
+	return nil
+end
+
+task.spawn(function()
+	while true do
+		if autoPotion and requestUsePotionRemote then
+			local hpPotion = findUsablePotion(HP_POTION_PRIORITY)
+			if hpPotion then
+				pcall(function()
+					requestUsePotionRemote:InvokeServer(hpPotion)
+				end)
+			end
+			task.wait(0.3)
+
+			local mpPotion = findUsablePotion(MP_POTION_PRIORITY)
+			if mpPotion then
+				pcall(function()
+					requestUsePotionRemote:InvokeServer(mpPotion)
+				end)
+			end
+			task.wait(2)
+		else
+			task.wait(1)
+		end
+	end
+end)
+
+-- Safe Zone monitor
+task.spawn(function()
+	while true do
+		task.wait(0.2)
+		if autoSafeZone then
+			local char = LocalPlayer.Character
+			local hum = char and char:FindFirstChildOfClass("Humanoid")
+			if hum and hum.Health > 0 then
+				local healthPct = (hum.Health / hum.MaxHealth) * 100
+				if healthPct <= safeZonePercent and not isHealingInSafeZone then
+					local targetPart = getSafeZoneBasePart()
+					if targetPart then
+						isHealingInSafeZone = true
+					end
+				elseif isHealingInSafeZone and hum.Health >= (hum.MaxHealth * 0.98) then
+					isHealingInSafeZone = false
+				end
+			else
+				isHealingInSafeZone = false
+			end
+		else
+			isHealingInSafeZone = false
+		end
+	end
+end)
+
+RunService.RenderStepped:Connect(function()
+	if autoSafeZone and isHealingInSafeZone then
+		local char = LocalPlayer.Character
+		local hrp = char and getHRP(char)
+		local targetPart = getSafeZoneBasePart()
+		if hrp and targetPart then
+			hrp.AssemblyLinearVelocity = Vector3.zero
+			hrp.AssemblyAngularVelocity = Vector3.zero
+			hrp.CFrame = targetPart.CFrame * CFrame.new(0, 3, 0)
+			pcall(function()
+				firetouchinterest(hrp, targetPart, 0)
+				firetouchinterest(hrp, targetPart, 1)
+			end)
+		end
+	end
+end)
+
+-- Farm loop
+RunService.RenderStepped:Connect(function()
+	if isFarming and not isHealingInSafeZone then
+		local char = LocalPlayer.Character
+		local hrp = char and getHRP(char)
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+
+		if hrp and hum and hum.Health > 0 then
+			if not currentTargetMob or not currentTargetMob.Parent then
+				currentTargetMob = nil
+			else
+				local tHum = currentTargetMob:FindFirstChildOfClass("Humanoid")
+				if not tHum or tHum.Health <= 0 then
+					currentTargetMob = nil
+				end
+			end
+
+			if not currentTargetMob then
+				local closestDist = math.huge
+				local searchPaths = getMobFolders()
+
+				for _, folder in ipairs(searchPaths) do
+					for _, mob in ipairs(folder:GetChildren()) do
+						if mob:IsA("Model") and getHRP(mob) then
+							if isMobSelected(mob.Name) then
+								local tHum = mob:FindFirstChildOfClass("Humanoid")
+								local tHrp = getHRP(mob)
+								if tHum and tHrp and tHum.Health > 0 then
+									local dist = (tHrp.Position - hrp.Position).Magnitude
+									if dist < closestDist then
+										closestDist = dist
+										currentTargetMob = mob
+									end
+								end
+							end
+						end
+					end
+				end
+			end
+
+			if currentTargetMob then
+				local tHrp = getHRP(currentTargetMob)
+				if tHrp then
+					local targetCFrame = tHrp.CFrame * CFrame.new(0, 0, farmDistance)
+					if (hrp.Position - targetCFrame.Position).Magnitude > 0.5 then
+						local lookAtCFrame = CFrame.lookAt(targetCFrame.Position, tHrp.Position)
+						hrp.AssemblyLinearVelocity = Vector3.zero
+						hrp.AssemblyAngularVelocity = Vector3.zero
+						hrp.CFrame = hrp.CFrame:Lerp(lookAtCFrame, 0.25)
+					end
+				end
+			end
+		end
+	end
+end)
+
+-- ==========================================
+-- UI CONSTRUCTION
+-- ==========================================
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "StoryRpg"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+
+local buildMainUI
+
+local COLOR_BG_DARK    = Color3.fromRGB(0, 0, 0)
+local COLOR_PANEL      = Color3.fromRGB(10, 10, 10)
+local COLOR_PANEL_ALT  = Color3.fromRGB(18, 18, 18)
+local COLOR_STROKE_OFF = Color3.fromRGB(55, 55, 55)
+local COLOR_STROKE_ON  = Color3.fromRGB(255, 255, 255)
+local COLOR_TEXT       = Color3.fromRGB(255, 255, 255)
+local COLOR_TEXT_DIM   = Color3.fromRGB(190, 190, 190)
+
+local function roundCorner(inst, radius)
+	local c = Instance.new("UICorner")
+	c.CornerRadius = UDim.new(0, radius or 5)
+	c.Parent = inst
+	return c
+end
+
+local function addStroke(inst, color, thickness)
+	local s = Instance.new("UIStroke")
+	s.Color = color or COLOR_STROKE_OFF
+	s.Thickness = thickness or 1
+	s.Parent = inst
+	return s
+end
+
+-- ===== KEY SCREEN =====
+if not bypassKey then
+	local KeyFrame = Instance.new("Frame")
+	KeyFrame.Size = UDim2.new(0, 270, 0, 160)
+	KeyFrame.Position = UDim2.new(0.5, -135, 0.5, -80)
+	KeyFrame.BackgroundColor3 = COLOR_BG_DARK
+	KeyFrame.BorderSizePixel = 0
+	KeyFrame.Parent = ScreenGui
+	roundCorner(KeyFrame, 8)
+	addStroke(KeyFrame, COLOR_STROKE_OFF, 1.5)
+
+	local KeyTitle = Instance.new("TextLabel")
+	KeyTitle.Size = UDim2.new(1, 0, 0, 26)
+	KeyTitle.Position = UDim2.new(0, 0, 0, 8)
+	KeyTitle.BackgroundTransparency = 1
+	KeyTitle.Text = "eyaugh — Key Required"
+	KeyTitle.TextColor3 = COLOR_TEXT
+	KeyTitle.Font = Enum.Font.GothamBold
+	KeyTitle.TextSize = 13
+	KeyTitle.Parent = KeyFrame
+
+	local KeySub = Instance.new("TextLabel")
+	KeySub.Size = UDim2.new(1, -20, 0, 28)
+	KeySub.Position = UDim2.new(0, 10, 0, 32)
+	KeySub.BackgroundTransparency = 1
+	KeySub.Text = "DM Eraña on Discord to get the key"
+	KeySub.TextColor3 = COLOR_TEXT_DIM
+	KeySub.Font = Enum.Font.Gotham
+	KeySub.TextSize = 10
+	KeySub.TextWrapped = true
+	KeySub.Parent = KeyFrame
+
+	local KeyBox = Instance.new("TextBox")
+	KeyBox.Size = UDim2.new(1, -20, 0, 28)
+	KeyBox.Position = UDim2.new(0, 10, 0, 66)
+	KeyBox.BackgroundColor3 = COLOR_PANEL_ALT
+	KeyBox.PlaceholderText = "Enter Key..."
+	KeyBox.Text = ""
+	KeyBox.TextColor3 = COLOR_TEXT
+	KeyBox.PlaceholderColor3 = Color3.fromRGB(140, 140, 140)
+	KeyBox.Font = Enum.Font.GothamMedium
+	KeyBox.TextSize = 12
+	KeyBox.ClearTextOnFocus = false
+	KeyBox.Parent = KeyFrame
+	roundCorner(KeyBox, 5)
+	addStroke(KeyBox, COLOR_STROKE_OFF, 1)
+
+	local SubmitBtn = Instance.new("TextButton")
+	SubmitBtn.Size = UDim2.new(1, -20, 0, 28)
+	SubmitBtn.Position = UDim2.new(0, 10, 0, 104)
+	SubmitBtn.BackgroundColor3 = COLOR_PANEL_ALT
+	SubmitBtn.Text = "SUBMIT"
+	SubmitBtn.TextColor3 = COLOR_TEXT
+	SubmitBtn.Font = Enum.Font.GothamBold
+	SubmitBtn.TextSize = 12
+	SubmitBtn.Parent = KeyFrame
+	roundCorner(SubmitBtn, 5)
+	addStroke(SubmitBtn, COLOR_STROKE_OFF, 1)
+
+	local KeyNote = Instance.new("TextLabel")
+	KeyNote.Size = UDim2.new(1, -20, 0, 14)
+	KeyNote.Position = UDim2.new(0, 10, 0, 136)
+	KeyNote.BackgroundTransparency = 1
+	KeyNote.Text = "Tip: some keys grant permanent access"
+	KeyNote.TextColor3 = COLOR_TEXT_DIM
+	KeyNote.Font = Enum.Font.Gotham
+	KeyNote.TextSize = 8
+	KeyNote.Parent = KeyFrame
+
+	local function tryKey()
+		local entered = KeyBox.Text
+		if entered == PERMANENT_KEY then
+			savePermanentAccess()
+			KeyFrame:Destroy()
+			buildMainUI()
+		elseif entered == VALID_KEY then
+			KeyFrame:Destroy()
+			buildMainUI()
+		else
+			KeyTitle.Text = "Invalid Key!"
+			KeyTitle.TextColor3 = Color3.fromRGB(255, 90, 90)
+		end
+	end
+
+	SubmitBtn.MouseButton1Click:Connect(tryKey)
+	KeyBox.FocusLost:Connect(function(enterPressed)
+		if enterPressed then tryKey() end
+	end)
+end
+
+-- ===== MAIN UI =====
+buildMainUI = function()
+	local OpenToggleButton = Instance.new("TextButton")
+	OpenToggleButton.Size = UDim2.new(0, 68, 0, 23)
+	OpenToggleButton.Position = UDim2.new(0, 14, 0.45, 0)
+	OpenToggleButton.BackgroundColor3 = COLOR_PANEL
+	OpenToggleButton.Text = "TOGGLE UI"
+	OpenToggleButton.TextColor3 = COLOR_TEXT
+	OpenToggleButton.Font = Enum.Font.GothamBold
+	OpenToggleButton.TextSize = 9
+	OpenToggleButton.Active = true
+	OpenToggleButton.Draggable = true
+	OpenToggleButton.Parent = ScreenGui
+	roundCorner(OpenToggleButton, 6)
+	addStroke(OpenToggleButton, COLOR_STROKE_OFF, 1.5)
+
+	local MainFrame = Instance.new("Frame")
+	MainFrame.Size = UDim2.new(0, 252, 0, 396)
+	MainFrame.Position = UDim2.new(0.05, 0, 0.12, 0)
+	MainFrame.BackgroundColor3 = COLOR_BG_DARK
+	MainFrame.Active = true
+	MainFrame.Draggable = true
+	MainFrame.Parent = ScreenGui
+	roundCorner(MainFrame, 8)
+	addStroke(MainFrame, COLOR_STROKE_OFF, 1.5)
+
+	local Header = Instance.new("Frame")
+	Header.Size = UDim2.new(1, 0, 0, 29)
+	Header.BackgroundTransparency = 1
+	Header.Parent = MainFrame
+
+	local Title = Instance.new("TextLabel")
+	Title.Size = UDim2.new(1, -36, 1, 0)
+	Title.Position = UDim2.new(0, 9, 0, 0)
+	Title.BackgroundTransparency = 1
+	Title.Text = "Story RPG By NIA"
+	Title.TextColor3 = COLOR_TEXT
+	Title.Font = Enum.Font.GothamBold
+	Title.TextSize = 11
+	Title.TextXAlignment = Enum.TextXAlignment.Left
+	Title.Parent = Header
+
+	local HideBtn = Instance.new("TextButton")
+	HideBtn.Size = UDim2.new(0, 20, 0, 20)
+	HideBtn.Position = UDim2.new(1, -24, 0, 4)
+	HideBtn.BackgroundColor3 = COLOR_PANEL
+	HideBtn.Text = "-"
+	HideBtn.TextColor3 = COLOR_TEXT
+	HideBtn.Font = Enum.Font.GothamBold
+	HideBtn.TextSize = 11
+	HideBtn.Parent = Header
+	roundCorner(HideBtn, 5)
+	addStroke(HideBtn, COLOR_STROKE_OFF, 1)
+
+	-- Tabs
+	local TabContainer = Instance.new("Frame")
+	TabContainer.Size = UDim2.new(1, -18, 0, 25)
+	TabContainer.Position = UDim2.new(0, 9, 0, 32)
+	TabContainer.BackgroundTransparency = 1
+	TabContainer.Parent = MainFrame
+
+	local FarmTab = Instance.new("TextButton")
+	FarmTab.Size = UDim2.new(0.5, -2, 1, 0)
+	FarmTab.BackgroundColor3 = COLOR_PANEL_ALT
+	FarmTab.Text = "FARM"
+	FarmTab.TextColor3 = COLOR_TEXT
+	FarmTab.Font = Enum.Font.GothamBold
+	FarmTab.TextSize = 9
+	FarmTab.Parent = TabContainer
+	roundCorner(FarmTab, 5)
+	local FarmTabStroke = addStroke(FarmTab, COLOR_STROKE_ON, 1.5)
+
+	local SellBuyTab = Instance.new("TextButton")
+	SellBuyTab.Size = UDim2.new(0.5, -2, 1, 0)
+	SellBuyTab.Position = UDim2.new(0.5, 2, 0, 0)
+	SellBuyTab.BackgroundColor3 = COLOR_PANEL
+	SellBuyTab.Text = "SELL & BUY"
+	SellBuyTab.TextColor3 = COLOR_TEXT
+	SellBuyTab.Font = Enum.Font.GothamBold
+	SellBuyTab.TextSize = 9
+	SellBuyTab.Parent = TabContainer
+	roundCorner(SellBuyTab, 5)
+	local SellBuyTabStroke = addStroke(SellBuyTab, COLOR_STROKE_OFF, 1)
+
+	local FarmContent = Instance.new("Frame")
+	FarmContent.Size = UDim2.new(1, 0, 1, -61)
+	FarmContent.Position = UDim2.new(0, 0, 0, 61)
+	FarmContent.BackgroundTransparency = 1
+	FarmContent.Parent = MainFrame
+
+	local SellBuyContent = Instance.new("Frame")
+	SellBuyContent.Size = UDim2.new(1, 0, 1, -61)
+	SellBuyContent.Position = UDim2.new(0, 0, 0, 61)
+	SellBuyContent.BackgroundTransparency = 1
+	SellBuyContent.Visible = false
+	SellBuyContent.Parent = MainFrame
+
+	FarmTab.MouseButton1Click:Connect(function()
+		FarmContent.Visible = true
+		SellBuyContent.Visible = false
+		FarmTab.BackgroundColor3 = COLOR_PANEL_ALT
+		SellBuyTab.BackgroundColor3 = COLOR_PANEL
+		FarmTabStroke.Color = COLOR_STROKE_ON
+		FarmTabStroke.Thickness = 1.5
+		SellBuyTabStroke.Color = COLOR_STROKE_OFF
+		SellBuyTabStroke.Thickness = 1
+	end)
+
+	SellBuyTab.MouseButton1Click:Connect(function()
+		FarmContent.Visible = false
+		SellBuyContent.Visible = true
+		FarmTab.BackgroundColor3 = COLOR_PANEL
+		SellBuyTab.BackgroundColor3 = COLOR_PANEL_ALT
+		FarmTabStroke.Color = COLOR_STROKE_OFF
+		FarmTabStroke.Thickness = 1
+		SellBuyTabStroke.Color = COLOR_STROKE_ON
+		SellBuyTabStroke.Thickness = 1.5
+	end)
+
+	-- ===== FARM TAB =====
+	local SearchBox = Instance.new("TextBox")
+	SearchBox.Size = UDim2.new(1, -18, 0, 23)
+	SearchBox.Position = UDim2.new(0, 9, 0, 0)
+	SearchBox.BackgroundColor3 = COLOR_PANEL
+	SearchBox.PlaceholderText = "Search Mobs..."
+	SearchBox.Text = ""
+	SearchBox.TextColor3 = COLOR_TEXT
+	SearchBox.PlaceholderColor3 = Color3.fromRGB(130, 130, 130)
+	SearchBox.Font = Enum.Font.GothamMedium
+	SearchBox.TextSize = 9
+	SearchBox.Parent = FarmContent
+	roundCorner(SearchBox, 5)
+	addStroke(SearchBox, COLOR_STROKE_OFF, 1)
+
+	local Scroller = Instance.new("ScrollingFrame")
+	Scroller.Size = UDim2.new(1, -18, 0, 99)
+	Scroller.Position = UDim2.new(0, 9, 0, 29)
+	Scroller.BackgroundColor3 = COLOR_PANEL
+	Scroller.ScrollBarThickness = 3
+	Scroller.CanvasSize = UDim2.new(0, 0, 0, 0)
+	Scroller.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	Scroller.Parent = FarmContent
+	roundCorner(Scroller, 5)
+	addStroke(Scroller, COLOR_STROKE_OFF, 1)
+
+	local Layout = Instance.new("UIListLayout")
+	Layout.Padding = UDim.new(0, 4)
+	Layout.SortOrder = Enum.SortOrder.LayoutOrder
+	Layout.Parent = Scroller
+
+	local Padding = Instance.new("UIPadding")
+	Padding.PaddingTop = UDim.new(0, 4)
+	Padding.PaddingBottom = UDim.new(0, 4)
+	Padding.PaddingLeft = UDim.new(0, 4)
+	Padding.PaddingRight = UDim.new(0, 4)
+	Padding.Parent = Scroller
+
+	local StartBtn = Instance.new("TextButton")
+	StartBtn.Size = UDim2.new(0.5, -12, 0, 25)
+	StartBtn.Position = UDim2.new(0, 9, 0, 135)
+	StartBtn.BackgroundColor3 = COLOR_PANEL
+	StartBtn.Text = "START FARM"
+	StartBtn.TextColor3 = COLOR_TEXT
+	StartBtn.Font = Enum.Font.GothamBold
+	StartBtn.TextSize = 8
+	StartBtn.Parent = FarmContent
+	roundCorner(StartBtn, 5)
+	addStroke(StartBtn, COLOR_STROKE_OFF, 1)
+
+	local StopBtn = Instance.new("TextButton")
+	StopBtn.Size = UDim2.new(0.5, -12, 0, 25)
+	StopBtn.Position = UDim2.new(0.5, 3, 0, 135)
+	StopBtn.BackgroundColor3 = COLOR_PANEL
+	StopBtn.Text = "STOP FARM"
+	StopBtn.TextColor3 = COLOR_TEXT
+	StopBtn.Font = Enum.Font.GothamBold
+	StopBtn.TextSize = 8
+	StopBtn.Parent = FarmContent
+	roundCorner(StopBtn, 5)
+	addStroke(StopBtn, COLOR_STROKE_OFF, 1)
+
+	local AtkBtn = Instance.new("TextButton")
+	AtkBtn.Size = UDim2.new(0.5, -12, 0, 25)
+	AtkBtn.Position = UDim2.new(0, 9, 0, 164)
+	AtkBtn.BackgroundColor3 = COLOR_PANEL
+	AtkBtn.Text = "AUTO ATTACK: OFF"
+	AtkBtn.TextColor3 = COLOR_TEXT
+	AtkBtn.Font = Enum.Font.GothamBold
+	AtkBtn.TextSize = 8
+	AtkBtn.Parent = FarmContent
+	roundCorner(AtkBtn, 5)
+	local AtkStroke = addStroke(AtkBtn, COLOR_STROKE_OFF, 1)
+
+	local SkillBtn = Instance.new("TextButton")
+	SkillBtn.Size = UDim2.new(0.5, -12, 0, 25)
+	SkillBtn.Position = UDim2.new(0.5, 3, 0, 164)
+	SkillBtn.BackgroundColor3 = COLOR_PANEL
+	SkillBtn.Text = "AUTO SKILLS: OFF"
+	SkillBtn.TextColor3 = COLOR_TEXT
+	SkillBtn.Font = Enum.Font.GothamBold
+	SkillBtn.TextSize = 8
+	SkillBtn.Parent = FarmContent
+	roundCorner(SkillBtn, 5)
+	local SkillStroke = addStroke(SkillBtn, COLOR_STROKE_OFF, 1)
+
+	local SafeBtn = Instance.new("TextButton")
+	SafeBtn.Size = UDim2.new(0.5, -12, 0, 25)
+	SafeBtn.Position = UDim2.new(0, 9, 0, 194)
+	SafeBtn.BackgroundColor3 = COLOR_PANEL
+	SafeBtn.Text = "SAFE ZONE: OFF"
+	SafeBtn.TextColor3 = COLOR_TEXT
+	SafeBtn.Font = Enum.Font.GothamBold
+	SafeBtn.TextSize = 8
+	SafeBtn.Parent = FarmContent
+	roundCorner(SafeBtn, 5)
+	local SafeStroke = addStroke(SafeBtn, COLOR_STROKE_OFF, 1)
+
+	local SafeHpFrame = Instance.new("Frame")
+	SafeHpFrame.Size = UDim2.new(0.5, -12, 0, 25)
+	SafeHpFrame.Position = UDim2.new(0.5, 3, 0, 194)
+	SafeHpFrame.BackgroundColor3 = COLOR_PANEL
+	SafeHpFrame.Parent = FarmContent
+	roundCorner(SafeHpFrame, 5)
+	addStroke(SafeHpFrame, COLOR_STROKE_OFF, 1)
+
+	local SafeHpLabel = Instance.new("TextLabel")
+	SafeHpLabel.Size = UDim2.new(1, 0, 0, 8)
+	SafeHpLabel.Position = UDim2.new(0, 5, 0, 2)
+	SafeHpLabel.BackgroundTransparency = 1
+	SafeHpLabel.Text = "SAFE ZONE HP %"
+	SafeHpLabel.TextColor3 = COLOR_TEXT_DIM
+	SafeHpLabel.Font = Enum.Font.GothamBold
+	SafeHpLabel.TextSize = 6
+	SafeHpLabel.TextXAlignment = Enum.TextXAlignment.Left
+	SafeHpLabel.Parent = SafeHpFrame
+
+	local SafeHpBox = Instance.new("TextBox")
+	SafeHpBox.Size = UDim2.new(1, -10, 0, 13)
+	SafeHpBox.Position = UDim2.new(0, 5, 0, 10)
+	SafeHpBox.BackgroundTransparency = 1
+	SafeHpBox.Text = "20"
+	SafeHpBox.TextColor3 = COLOR_TEXT
+	SafeHpBox.Font = Enum.Font.GothamMedium
+	SafeHpBox.TextSize = 9
+	SafeHpBox.TextXAlignment = Enum.TextXAlignment.Left
+	SafeHpBox.ClearTextOnFocus = false
+	SafeHpBox.Parent = SafeHpFrame
+
+	local DistFrame = Instance.new("Frame")
+	DistFrame.Size = UDim2.new(0.5, -12, 0, 25)
+	DistFrame.Position = UDim2.new(0, 9, 0, 224)
+	DistFrame.BackgroundColor3 = COLOR_PANEL
+	DistFrame.Parent = FarmContent
+	roundCorner(DistFrame, 5)
+	addStroke(DistFrame, COLOR_STROKE_OFF, 1)
+
+	local DistLabel = Instance.new("TextLabel")
+	DistLabel.Size = UDim2.new(1, 0, 0, 8)
+	DistLabel.Position = UDim2.new(0, 5, 0, 2)
+	DistLabel.BackgroundTransparency = 1
+	DistLabel.Text = "FARM DISTANCE (STUDS)"
+	DistLabel.TextColor3 = COLOR_TEXT_DIM
+	DistLabel.Font = Enum.Font.GothamBold
+	DistLabel.TextSize = 6
+	DistLabel.TextXAlignment = Enum.TextXAlignment.Left
+	DistLabel.Parent = DistFrame
+
+	local DistBox = Instance.new("TextBox")
+	DistBox.Size = UDim2.new(1, -10, 0, 13)
+	DistBox.Position = UDim2.new(0, 5, 0, 10)
+	DistBox.BackgroundTransparency = 1
+	DistBox.Text = "5"
+	DistBox.TextColor3 = COLOR_TEXT
+	DistBox.Font = Enum.Font.GothamMedium
+	DistBox.TextSize = 9
+	DistBox.TextXAlignment = Enum.TextXAlignment.Left
+	DistBox.ClearTextOnFocus = false
+	DistBox.Parent = DistFrame
+
+	local SpeedBtn = Instance.new("TextButton")
+	SpeedBtn.Size = UDim2.new(0.5, -12, 0, 25)
+	SpeedBtn.Position = UDim2.new(0.5, 3, 0, 224)
+	SpeedBtn.BackgroundColor3 = COLOR_PANEL
+	SpeedBtn.Text = "WALKSPEED: OFF"
+	SpeedBtn.TextColor3 = COLOR_TEXT
+	SpeedBtn.Font = Enum.Font.GothamBold
+	SpeedBtn.TextSize = 8
+	SpeedBtn.Parent = FarmContent
+	roundCorner(SpeedBtn, 5)
+	local SpeedStroke = addStroke(SpeedBtn, COLOR_STROKE_OFF, 1)
+
+	local AfkText = Instance.new("TextLabel")
+	AfkText.Size = UDim2.new(1, -18, 0, 22)
+	AfkText.Position = UDim2.new(0, 9, 0, 253)
+	AfkText.BackgroundColor3 = COLOR_PANEL
+	AfkText.Text = "ANTI-AFK: ACTIVE"
+	AfkText.TextColor3 = COLOR_TEXT
+	AfkText.Font = Enum.Font.GothamBold
+	AfkText.TextSize = 8
+	AfkText.Parent = FarmContent
+	roundCorner(AfkText, 5)
+	addStroke(AfkText, COLOR_STROKE_OFF, 1)
+
+	local StatusText = Instance.new("TextLabel")
+	StatusText.Size = UDim2.new(1, -18, 0, 43)
+	StatusText.Position = UDim2.new(0, 9, 0, 279)
+	StatusText.BackgroundColor3 = COLOR_PANEL
+	StatusText.Text = "Status: Idle (Select Mob)"
+	StatusText.TextColor3 = COLOR_TEXT
+	StatusText.Font = Enum.Font.GothamBold
+	StatusText.TextSize = 8
+	StatusText.TextWrapped = true
+	StatusText.Parent = FarmContent
+	roundCorner(StatusText, 5)
+	addStroke(StatusText, COLOR_STROKE_OFF, 1)
+
+	-- ===== SELL & BUY TAB =====
+	local SellItemsBtn = Instance.new("TextButton")
+	SellItemsBtn.Size = UDim2.new(1, -18, 0, 30)
+	SellItemsBtn.Position = UDim2.new(0, 9, 0, 10)
+	SellItemsBtn.BackgroundColor3 = COLOR_PANEL
+	SellItemsBtn.Text = "AUTO SELL ITEMS: OFF"
+	SellItemsBtn.TextColor3 = COLOR_TEXT
+	SellItemsBtn.Font = Enum.Font.GothamBold
+	SellItemsBtn.TextSize = 9
+	SellItemsBtn.Parent = SellBuyContent
+	roundCorner(SellItemsBtn, 5)
+	local SellItemsStroke = addStroke(SellItemsBtn, COLOR_STROKE_OFF, 1)
+
+	local BuyGuardsBtn = Instance.new("TextButton")
+	BuyGuardsBtn.Size = UDim2.new(1, -18, 0, 30)
+	BuyGuardsBtn.Position = UDim2.new(0, 9, 0, 50)
+	BuyGuardsBtn.BackgroundColor3 = COLOR_PANEL
+	BuyGuardsBtn.Text = "AUTO BUY GUARDS: OFF"
+	BuyGuardsBtn.TextColor3 = COLOR_TEXT
+	BuyGuardsBtn.Font = Enum.Font.GothamBold
+	BuyGuardsBtn.TextSize = 9
+	BuyGuardsBtn.Parent = SellBuyContent
+	roundCorner(BuyGuardsBtn, 5)
+	local BuyGuardsStroke = addStroke(BuyGuardsBtn, COLOR_STROKE_OFF, 1)
+
+	local PotionBtn = Instance.new("TextButton")
+	PotionBtn.Size = UDim2.new(1, -18, 0, 30)
+	PotionBtn.Position = UDim2.new(0, 9, 0, 90)
+	PotionBtn.BackgroundColor3 = COLOR_PANEL
+	PotionBtn.Text = "AUTO POTION: OFF"
+	PotionBtn.TextColor3 = COLOR_TEXT
+	PotionBtn.Font = Enum.Font.GothamBold
+	PotionBtn.TextSize = 9
+	PotionBtn.Parent = SellBuyContent
+	roundCorner(PotionBtn, 5)
+	local PotionStroke = addStroke(PotionBtn, COLOR_STROKE_OFF, 1)
+
+	local InfoText = Instance.new("TextLabel")
+	InfoText.Size = UDim2.new(1, -18, 0, 180)
+	InfoText.Position = UDim2.new(0, 9, 0, 135)
+	InfoText.BackgroundColor3 = COLOR_PANEL
+	InfoText.Text = "AUTO SELL ITEMS:\nReads your real inventory and only sells what you actually own. Items you don't have are skipped.\n\nAUTO BUY GUARDS:\nBuys EnhProtect & EnhNoDown\n\nAUTO POTION:\nDetects which Hp/Mp potion tier you own (L > M > S) and uses whichever is available."
+	InfoText.TextColor3 = COLOR_TEXT_DIM
+	InfoText.Font = Enum.Font.Gotham
+	InfoText.TextSize = 8
+	InfoText.TextWrapped = true
+	InfoText.TextYAlignment = Enum.TextYAlignment.Top
+	InfoText.Parent = SellBuyContent
+	roundCorner(InfoText, 5)
+	addStroke(InfoText, COLOR_STROKE_OFF, 1)
+
+	local InfoPadding = Instance.new("UIPadding")
+	InfoPadding.PaddingTop = UDim.new(0, 8)
+	InfoPadding.PaddingLeft = UDim.new(0, 8)
+	InfoPadding.PaddingRight = UDim.new(0, 8)
+	InfoPadding.Parent = InfoText
+
+	-- Status loop
+	task.spawn(function()
+		while task.wait(0.5) do
+			if isHealingInSafeZone then
+				StatusText.Text = "Status: Healing in Safe Zone..."
+			elseif isFarming then
+				local list = table.concat(selectedMobNames, ", ")
+				StatusText.Text = "Farming: " .. (list ~= "" and list or "Any Mob")
+			end
+		end
+	end)
+
+	-- ===== LISTENERS =====
+	OpenToggleButton.MouseButton1Click:Connect(function()
+		MainFrame.Visible = not MainFrame.Visible
+	end)
+
+	HideBtn.MouseButton1Click:Connect(function()
+		MainFrame.Visible = false
+	end)
+
+	UserInputService.InputBegan:Connect(function(input, gameProcessed)
+		if not gameProcessed and input.KeyCode == Enum.KeyCode.RightShift then
+			MainFrame.Visible = not MainFrame.Visible
+		end
+	end)
+
+	AtkBtn.MouseButton1Click:Connect(function()
+		autoAttack = not autoAttack
+		AtkBtn.Text = autoAttack and "AUTO ATTACK: ON" or "AUTO ATTACK: OFF"
+		AtkStroke.Color = autoAttack and COLOR_STROKE_ON or COLOR_STROKE_OFF
+		AtkBtn.BackgroundColor3 = autoAttack and COLOR_PANEL_ALT or COLOR_PANEL
+	end)
+
+	SkillBtn.MouseButton1Click:Connect(function()
+		autoSkills = not autoSkills
+		SkillBtn.Text = autoSkills and "AUTO SKILLS: ON" or "AUTO SKILLS: OFF"
+		SkillStroke.Color = autoSkills and COLOR_STROKE_ON or COLOR_STROKE_OFF
+		SkillBtn.BackgroundColor3 = autoSkills and COLOR_PANEL_ALT or COLOR_PANEL
+	end)
+
+	SafeBtn.MouseButton1Click:Connect(function()
+		autoSafeZone = not autoSafeZone
+		SafeBtn.Text = autoSafeZone and "SAFE ZONE: ON" or "SAFE ZONE: OFF"
+		SafeStroke.Color = autoSafeZone and COLOR_STROKE_ON or COLOR_STROKE_OFF
+		SafeBtn.BackgroundColor3 = autoSafeZone and COLOR_PANEL_ALT or COLOR_PANEL
+		if not autoSafeZone then isHealingInSafeZone = false end
+	end)
+
+	SafeHpBox:GetPropertyChangedSignal("Text"):Connect(function()
+		local val = tonumber(SafeHpBox.Text)
+		if val then safeZonePercent = val end
+	end)
+
+	DistBox:GetPropertyChangedSignal("Text"):Connect(function()
+		local val = tonumber(DistBox.Text)
+		if val then farmDistance = val end
+	end)
+
+	local wsCycle = {30, 50, 70}
+	local wsIndex = 1
+	SpeedBtn.MouseButton1Click:Connect(function()
+		if not walkspeedActive then
+			walkspeedActive = true
+			wsIndex = 1
+			walkspeedValue = wsCycle[wsIndex]
+		else
+			wsIndex = wsIndex + 1
+			if wsIndex > #wsCycle then
+				walkspeedActive = false
+			else
+				walkspeedValue = wsCycle[wsIndex]
+			end
+		end
+
+		if walkspeedActive then
+			SpeedBtn.Text = "WALKSPEED: " .. walkspeedValue
+			SpeedStroke.Color = COLOR_STROKE_ON
+			SpeedBtn.BackgroundColor3 = COLOR_PANEL_ALT
+		else
+			SpeedBtn.Text = "WALKSPEED: OFF"
+			SpeedStroke.Color = COLOR_STROKE_OFF
+			SpeedBtn.BackgroundColor3 = COLOR_PANEL
+			local char = LocalPlayer.Character
+			if char and char:FindFirstChildOfClass("Humanoid") then
+				char:FindFirstChildOfClass("Humanoid").WalkSpeed = 16
+			end
+		end
+	end)
+
+	StartBtn.MouseButton1Click:Connect(function()
+		isFarming = true
+		local list = table.concat(selectedMobNames, ", ")
+		StatusText.Text = "Farming: " .. (list ~= "" and list or "Any Mob")
+	end)
+
+	StopBtn.MouseButton1Click:Connect(function()
+		isFarming = false
+		currentTargetMob = nil
+		StatusText.Text = "Status: Farming Stopped"
+	end)
+
+	SellItemsBtn.MouseButton1Click:Connect(function()
+		autoSellItems = not autoSellItems
+		SellItemsBtn.Text = autoSellItems and "AUTO SELL ITEMS: ON" or "AUTO SELL ITEMS: OFF"
+		SellItemsStroke.Color = autoSellItems and COLOR_STROKE_ON or COLOR_STROKE_OFF
+		SellItemsBtn.BackgroundColor3 = autoSellItems and COLOR_PANEL_ALT or COLOR_PANEL
+	end)
+
+	BuyGuardsBtn.MouseButton1Click:Connect(function()
+		autoBuyGuards = not autoBuyGuards
+		BuyGuardsBtn.Text = autoBuyGuards and "AUTO BUY GUARDS: ON" or "AUTO BUY GUARDS: OFF"
+		BuyGuardsStroke.Color = autoBuyGuards and COLOR_STROKE_ON or COLOR_STROKE_OFF
+		BuyGuardsBtn.BackgroundColor3 = autoBuyGuards and COLOR_PANEL_ALT or COLOR_PANEL
+	end)
+
+	PotionBtn.MouseButton1Click:Connect(function()
+		autoPotion = not autoPotion
+		PotionBtn.Text = autoPotion and "AUTO POTION: ON" or "AUTO POTION: OFF"
+		PotionStroke.Color = autoPotion and COLOR_STROKE_ON or COLOR_STROKE_OFF
+		PotionBtn.BackgroundColor3 = autoPotion and COLOR_PANEL_ALT or COLOR_PANEL
+	end)
+
+	-- Mob list (multi-select)
+	local function clearList()
+		for _, child in pairs(Scroller:GetChildren()) do
+			if child:IsA("TextButton") then child:Destroy() end
+		end
+	end
+
+	local function updateMobList()
+		clearList()
+		local query = string.lower(SearchBox.Text)
+		local aliveMobs = {}
+
+		for _, folder in ipairs(getMobFolders()) do
+			for _, mob in ipairs(folder:GetChildren()) do
+				if mob:IsA("Model") and getHRP(mob) then
+					local hum = mob:FindFirstChildOfClass("Humanoid")
+					if hum and hum.Health > 0 then
+						local baseName = getBaseName(mob.Name)
+						if query == "" or string.find(string.lower(baseName), query) then
+							aliveMobs[baseName] = (aliveMobs[baseName] or 0) + 1
+						end
+					end
+				end
+			end
+		end
+
+		local sortedNames = {}
+		for name in pairs(aliveMobs) do table.insert(sortedNames, name) end
+		table.sort(sortedNames)
+
+		for _, mobName in ipairs(sortedNames) do
+			local count = aliveMobs[mobName]
+			local isSelected = false
+			for _, sel in ipairs(selectedMobNames) do
+				if sel:lower() == mobName:lower() then isSelected = true break end
+			end
+
+			local btn = Instance.new("TextButton")
+			btn.Size = UDim2.new(1, 0, 0, 22)
+			btn.BackgroundColor3 = isSelected and COLOR_PANEL_ALT or COLOR_PANEL
+			btn.Text = mobName .. " (x" .. count .. ")"
+			btn.TextColor3 = COLOR_TEXT
+			btn.Font = Enum.Font.GothamBold
+			btn.TextSize = 8
+			btn.Parent = Scroller
+
+			roundCorner(btn, 4)
+			addStroke(btn, isSelected and COLOR_STROKE_ON or COLOR_STROKE_OFF, 1)
+
+			btn.MouseButton1Click:Connect(function()
+				toggleMobSelection(mobName)
+				currentTargetMob = nil
+				updateMobList()
+			end)
+		end
+	end
+
+	SearchBox:GetPropertyChangedSignal("Text"):Connect(updateMobList)
+
+	task.spawn(function()
+		while task.wait(2.5) do
+			updateMobList()
+		end
+	end)
+
+	updateMobList()
+end
+
+-- Launch
+if bypassKey then
+	buildMainUI()
+end
