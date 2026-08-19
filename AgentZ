@@ -226,8 +226,8 @@ task.spawn(function()
 				local args = {
 					{
 						items = {
-							{id = "Stone", count = 300},
-							{id = "MudBall", count = 300},
+							{id = "Stone", count = 99},
+							{id = "MudBall", count = 99},
 							{id = "Carrot", count = 99},
 							{id = "Rope", count = 99},
 							{id = "Branch", count = 99}
@@ -237,7 +237,7 @@ task.spawn(function()
 				}
 				sellBulkRemote:InvokeServer(unpack(args))
 			end)
-			task.wait(5)
+			task.wait(0.7)
 		else
 			task.wait(1)
 		end
