@@ -1,7 +1,8 @@
 -- ==========================================
--- STORY RPG — CUSTOM BLACK UI (Enhanced v4 - FIXED)
--- ✓ FIX: Sell list now actually includes the new items (was commented out)
--- ✓ FIX: World 2 Boss no longer gets stuck walking — now TPs + waits for each boss to spawn
+-- STORY RPG — CUSTOM BLACK UI (Enhanced v5)
+-- ✓ W2 BOSS now uses the same FARM-TAB movement/attack system
+--   (no more custom walking — just orchestrates selectedMob + TPs between areas)
+-- ✓ Sell list now actually includes the new items
 -- ==========================================
 local unpack = unpack or table.unpack
 
@@ -38,8 +39,12 @@ local autoSellItems = false
 local autoBuyGuards = false
 local autoPotion = false
 
+-- World 2 Boss Tab State
 local world2BossActive = false
 local world2BossStatus = "Idle"
+local world2Phase = 1 -- 1 = ForestKeeper, 2 = MotherGoblin
+local lastForestSeen = false
+local lastGoblinSeen = false
 
 -- ==========================================
 -- 🌲 WORLD 2 BOSS CONFIG
@@ -48,9 +53,6 @@ local WB2_BOSS1_NAME = "ForestKeeper_m"
 local WB2_BOSS1_POS  = Vector3.new(-1158, 463, -1497)
 local WB2_BOSS2_NAME = "MotherGoblin_m"
 local WB2_BOSS2_POS  = Vector3.new(-1134, 511, -3093)
-local WB2_WAIT_POS   = Vector3.new(-1158, 463, -1497)
-local WB2_FIGHT_DISTANCE = 4
-local WB2_RESPAWN_TIMEOUT = 180
 
 local selectedMobNames = {}
 local currentTargetMob = nil
@@ -61,7 +63,6 @@ local currentTargetMob = nil
 local VALID_KEY = "eyaganda"
 local PERMANENT_KEY = "haniluvseya143"
 local KEY_SAVE_FILE = "StoryRPG_KeySaved.txt"
-
 local WHITELISTED_USERIDS = { 1786667991123 }
 
 local function isWhitelisted()
@@ -186,10 +187,9 @@ local function getPotionCount(potionId)
 end
 
 -- ==========================================
--- 🌲 WORLD 2 BOSS — HELPERS (FIXED)
+-- 🌲 WORLD 2 BOSS — HELPERS
 -- ==========================================
--- Searches ALL descendants of _Runtime so it finds MotherGoblin no matter
--- how deep she's nested (e.g. _Runtime/World2/Bosses/MotherGoblin_m).
+-- Searches ALL descendants of _Runtime so bosses are found no matter how deep
 local function findBossByName(bossBaseName)
 	local runtime = Workspace:FindFirstChild("_Runtime")
 	if not runtime then return nil end
@@ -212,136 +212,74 @@ local function teleportTo(pos)
 	hrp.CFrame = CFrame.new(pos)
 end
 
--- TP to the position, then WAIT there until the boss spawns. No more walking
--- around aimlessly when the boss hasn't appeared yet.
-local function tpAndWaitForBoss(bossBaseName, pos, timeout)
-	teleportTo(pos)
-	local startTime = os.clock()
-	while world2BossActive do
-		local mob = findBossByName(bossBaseName)
-		if mob then
-			-- Once found, TP right next to it so we don't have to walk there
-			local mobHRP = getHRP(mob)
-			if mobHRP then
-				local standPos = mobHRP.Position + Vector3.new(WB2_FIGHT_DISTANCE, 0, 0)
-				teleportTo(standPos)
-				task.wait(0.2)
-			end
-			return mob
-		end
-		-- Keep re-TPing to the spot so we don't drift
-		if os.clock() - startTime > 2 then
-			teleportTo(pos)
-			startTime = os.clock() - 0.1
-		end
-		if os.clock() - startTime > (timeout or WB2_RESPAWN_TIMEOUT) then return nil end
-		task.wait(0.5)
-	end
-	return nil
-end
-
-local function fightBossUntilDead(bossModel)
-	local startTime = os.clock()
-	while world2BossActive do
-		if not bossModel or not bossModel.Parent then return false end
-		local hum = bossModel:FindFirstChildOfClass("Humanoid")
-		if not hum or hum.Health <= 0 then return true end
-		local bossHRP = getHRP(bossModel)
-		local myHRP = getMyHRP()
-		if not bossHRP or not myHRP then return false end
-		local dist = (myHRP.Position - bossHRP.Position).Magnitude
-		if dist > WB2_FIGHT_DISTANCE then
-			local dir = (bossHRP.Position - myHRP.Position)
-			dir = Vector3.new(dir.X, 0, dir.Z)
-			if dir.Magnitude > 0 then
-				dir = dir.Unit
-				myHRP.AssemblyLinearVelocity = Vector3.new(dir.X * walkspeedValue, myHRP.AssemblyLinearVelocity.Y, dir.Z * walkspeedValue)
-				myHRP.CFrame = CFrame.lookAt(myHRP.Position, bossHRP.Position)
-			end
-		else
-			myHRP.AssemblyLinearVelocity = Vector3.zero
-			myHRP.CFrame = CFrame.lookAt(myHRP.Position, bossHRP.Position)
-		end
-		if os.clock() - startTime > 180 then return false end
-		task.wait(0.15)
-	end
-	return false
-end
-
--- Main loop
+-- ==========================================
+-- 🌲 WORLD 2 BOSS — MONITOR LOOP (uses FARM TAB system)
+-- ==========================================
+-- This loop just detects boss death and switches the FARM TAB's selectedMobNames.
+-- The actual walking + attacking is handled by the regular RenderStepped farm loop.
 task.spawn(function()
-	while true do
+	while task.wait(0.3) do
 		if world2BossActive then
-			local ok, err = pcall(function()
+			local fk = findBossByName(WB2_BOSS1_NAME)
+			local mg = findBossByName(WB2_BOSS2_NAME)
+
+			if world2Phase == 1 then
 				-- Phase 1: ForestKeeper_m
-				world2BossStatus = "Phase 1: Looking for ForestKeeper_m"
-				local fk = findBossByName(WB2_BOSS1_NAME)
-				if not fk then
-					world2BossStatus = "Phase 1: Waiting for ForestKeeper_m to spawn..."
-					fk = tpAndWaitForBoss(WB2_BOSS1_NAME, WB2_BOSS1_POS, WB2_RESPAWN_TIMEOUT)
+				if fk then
+					lastForestSeen = true
+					world2BossStatus = "Phase 1: Fighting ForestKeeper_m"
+				else
+					if lastForestSeen then
+						-- ForestKeeper just died → switch to MotherGoblin
+						lastForestSeen = false
+						world2BossStatus = "Phase 2: TP to MotherGoblin_m"
+						teleportTo(WB2_BOSS2_POS)
+						selectedMobNames = { WB2_BOSS2_NAME }
+						currentTargetMob = nil
+						world2Phase = 2
+						task.wait(1)
+					else
+						-- ForestKeeper not spawned yet, wait at his spawn
+						world2BossStatus = "Phase 1: Waiting for ForestKeeper_m to spawn..."
+						local hrp = getMyHRP()
+						if hrp and (hrp.Position - WB2_BOSS1_POS).Magnitude > 30 then
+							teleportTo(WB2_BOSS1_POS)
+						end
+						selectedMobNames = { WB2_BOSS1_NAME }
+						task.wait(1)
+					end
 				end
-				if not world2BossActive then return end
-				if not fk then
-					world2BossStatus = "Phase 1: ForestKeeper_m spawn timeout — retrying"
-					task.wait(2)
-					return
+			elseif world2Phase == 2 then
+				-- Phase 2: MotherGoblin_m
+				if mg then
+					lastGoblinSeen = true
+					world2BossStatus = "Phase 2: Fighting MotherGoblin_m"
+				else
+					if lastGoblinSeen then
+						-- MotherGoblin just died → switch back to ForestKeeper
+						lastGoblinSeen = false
+						world2BossStatus = "Phase 3: TP to ForestKeeper_m"
+						teleportTo(WB2_BOSS1_POS)
+						selectedMobNames = { WB2_BOSS1_NAME }
+						currentTargetMob = nil
+						world2Phase = 1
+						task.wait(1)
+					else
+						-- MotherGoblin not spawned yet, wait at her location
+						world2BossStatus = "Phase 2: Waiting for MotherGoblin_m to spawn..."
+						local hrp = getMyHRP()
+						if hrp and (hrp.Position - WB2_BOSS2_POS).Magnitude > 30 then
+							teleportTo(WB2_BOSS2_POS)
+						end
+						selectedMobNames = { WB2_BOSS2_NAME }
+						task.wait(1)
+					end
 				end
-				world2BossStatus = "Phase 1: Fighting ForestKeeper_m"
-				fightBossUntilDead(fk)
-				if not world2BossActive then return end
-
-				-- Phase 2: TP to MotherGoblin_m location and kill her
-				world2BossStatus = "Phase 2: TP to MotherGoblin_m"
-				local mg = findBossByName(WB2_BOSS2_NAME)
-				if not mg then
-					world2BossStatus = "Phase 2: Waiting for MotherGoblin_m to spawn..."
-					mg = tpAndWaitForBoss(WB2_BOSS2_NAME, WB2_BOSS2_POS, WB2_RESPAWN_TIMEOUT)
-				end
-				if not world2BossActive then return end
-				if not mg then
-					world2BossStatus = "Phase 2: MotherGoblin_m spawn timeout — retrying"
-					task.wait(2)
-					return
-				end
-				world2BossStatus = "Phase 2: Fighting MotherGoblin_m"
-				fightBossUntilDead(mg)
-				if not world2BossActive then return end
-
-				-- Phase 3: TP back to ForestKeeper_m and kill him again
-				world2BossStatus = "Phase 3: TP back to ForestKeeper_m"
-				local fk2 = findBossByName(WB2_BOSS1_NAME)
-				if not fk2 then
-					world2BossStatus = "Phase 3: Waiting for ForestKeeper_m..."
-					fk2 = tpAndWaitForBoss(WB2_BOSS1_NAME, WB2_BOSS1_POS, WB2_RESPAWN_TIMEOUT)
-				end
-				if not fk2 then
-					world2BossStatus = "Phase 3: ForestKeeper_m spawn timeout — retrying"
-					task.wait(2)
-					return
-				end
-				world2BossStatus = "Phase 3: Fighting ForestKeeper_m (again)"
-				fightBossUntilDead(fk2)
-				if not world2BossActive then return end
-
-				-- Phase 4: TP to wait location and wait for ForestKeeper_m to respawn
-				world2BossStatus = "Phase 4: Waiting at spawn for ForestKeeper_m..."
-				local fk3 = tpAndWaitForBoss(WB2_BOSS1_NAME, WB2_WAIT_POS, WB2_RESPAWN_TIMEOUT)
-				if not fk3 then
-					world2BossStatus = "Phase 4: Respawn timeout — retrying"
-					task.wait(2)
-					return
-				end
-				-- Loop back to Phase 1
-			end)
-			if not ok then
-				warn("[World2Boss] loop error:", err)
-				world2BossStatus = "Error — retrying in 3s"
-				task.wait(3)
-			else
-				task.wait(0.5)
 			end
 		else
-			task.wait(0.5)
+			-- Reset when toggled off
+			lastForestSeen = false
+			lastGoblinSeen = false
 		end
 	end
 end)
@@ -412,7 +350,7 @@ task.spawn(function()
 end)
 
 -- ==========================================
--- 🛒 AUTO SELL — FIX: items are now ACTUALLY active (no longer commented)
+-- 🛒 AUTO SELL (fixed — all items now active, one per line)
 -- ==========================================
 local SELLABLE_ITEMS = {
 	"Stone",
@@ -420,7 +358,6 @@ local SELLABLE_ITEMS = {
 	"Carrot",
 	"Rope",
 	"Branch",
-	-- New items (each on its own line so there's no comment / quote confusion):
 	"GoldenCarrot",
 	"StrawKnot",
 	"MudCore",
@@ -548,6 +485,7 @@ RunService.RenderStepped:Connect(function()
 	end
 end)
 
+-- ===== FARM TAB RenderStepped (also used by World 2 Boss) =====
 RunService.RenderStepped:Connect(function()
 	if isFarming and not isHealingInSafeZone then
 		local char = LocalPlayer.Character
@@ -1173,14 +1111,15 @@ buildMainUI = function()
 	W2InfoPad.Parent = W2Info
 
 	W2Info.Text =
+		"Uses the SAME system as the FARM tab — walks to the closest matching mob and attacks.\n\n" ..
 		"Loop:\n" ..
-		"1. Kill ForestKeeper_m @ (-1158, 463, -1497)\n" ..
-		"2. TP to (-1134, 511, -3093) and kill MotherGoblin_m\n" ..
-		"3. TP back to (-1158, 463, -1497) and kill ForestKeeper_m again\n" ..
-		"4. TP to spawn and wait for ForestKeeper_m to respawn\n" ..
+		"1. Target ForestKeeper_m (farm tab walks to it)\n" ..
+		"2. When ForestKeeper dies → TP to MotherGoblin area\n" ..
+		"3. Target MotherGoblin_m (farm tab walks to her)\n" ..
+		"4. When MotherGoblin dies → TP back to ForestKeeper\n" ..
 		"5. Repeat forever\n\n" ..
 		"While ON: Auto Attack + Auto Skills 1/2/3 forced ON.\n" ..
-		"Noclip is also active during the loop."
+		"Noclip active. TP only happens between areas."
 
 	task.spawn(function()
 		while task.wait(0.4) do
@@ -1311,18 +1250,32 @@ buildMainUI = function()
 		PotionBtn.BackgroundColor3 = autoPotion and COLOR_PANEL_ALT or COLOR_PANEL
 	end)
 
+	-- WORLD 2 BOSS toggle — uses the FARM TAB system
 	W2ToggleBtn.MouseButton1Click:Connect(function()
 		world2BossActive = not world2BossActive
 		if world2BossActive then
 			W2ToggleBtn.Text = "WORLD 2 BOSS: ON"
 			W2ToggleStroke.Color = COLOR_ACCENT
 			W2ToggleBtn.BackgroundColor3 = COLOR_PANEL_ALT
-			isFarming = false
-			world2BossStatus = "Phase 1: Starting..."
+
+			-- Start using the farm tab's walk+attack system
+			isFarming = true
+			selectedMobNames = { WB2_BOSS1_NAME }
+			currentTargetMob = nil
+			world2Phase = 1
+			lastForestSeen = false
+			lastGoblinSeen = false
+			world2BossStatus = "Phase 1: Looking for ForestKeeper_m"
+
+			-- TP to ForestKeeper spawn so farm tab can immediately find him
+			teleportTo(WB2_BOSS1_POS)
 		else
 			W2ToggleBtn.Text = "WORLD 2 BOSS: OFF"
 			W2ToggleStroke.Color = COLOR_STROKE_OFF
 			W2ToggleBtn.BackgroundColor3 = COLOR_PANEL
+			isFarming = false
+			selectedMobNames = {}
+			currentTargetMob = nil
 			world2BossStatus = "Idle"
 		end
 	end)
