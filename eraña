@@ -1,11 +1,7 @@
 -- ==========================================
--- STORY RPG — CUSTOM BLACK UI (Enhanced v4)
--- ✓ v4: NEW "WORLD 2 BOSS" tab with toggle — ForestKeeper_m <-> MotherGoblin_m loop
--- ✓ Auto Sell reads REAL inventory (ClientState + InventoryUtil) — skips items you don't own
--- ✓ Auto Potion auto-detects owned tier (HpL/HpM/HpS, MpL/MpM/MpS)
--- ✓ Dual key: "eyaganda" (session only) / "haniluvseya143" (permanent, saved)
--- ✓ Skills 1, 2, 3
--- ✓ Multi-select mobs, black UI, ~90% scale
+-- STORY RPG — CUSTOM BLACK UI (Enhanced v4 - FIXED)
+-- ✓ FIX: Sell list now actually includes the new items (was commented out)
+-- ✓ FIX: World 2 Boss no longer gets stuck walking — now TPs + waits for each boss to spawn
 -- ==========================================
 local unpack = unpack or table.unpack
 
@@ -17,7 +13,6 @@ local UserInputService = game:GetService("UserInputService")
 local VirtualUser = game:GetService("VirtualUser")
 local LocalPlayer = Players.LocalPlayer
 
--- Remotes
 local remotesFolder = ReplicatedStorage:WaitForChild("Remotes", 5)
 local requestAttackRemote = remotesFolder and remotesFolder:WaitForChild("RequestAttack", 5)
 local skillCastRemote = remotesFolder and remotesFolder:WaitForChild("SkillCast", 5)
@@ -29,7 +24,6 @@ if not remotesFolder then warn("[StoryRPG] Remotes folder not found!") end
 if not requestAttackRemote then warn("[StoryRPG] RequestAttack remote not found!") end
 if not skillCastRemote then warn("[StoryRPG] SkillCast remote not found!") end
 
--- State
 local isFarming = false
 local autoAttack = false
 local autoSkills = false
@@ -40,12 +34,10 @@ local walkspeedValue = 30
 local farmDistance = 5
 local safeZonePercent = 20
 
--- Sell & Buy Tab State
 local autoSellItems = false
 local autoBuyGuards = false
 local autoPotion = false
 
--- World 2 Boss Tab State
 local world2BossActive = false
 local world2BossStatus = "Idle"
 
@@ -64,15 +56,13 @@ local selectedMobNames = {}
 local currentTargetMob = nil
 
 -- ==========================================
--- 🔑 KEY SYSTEM CONFIG
+-- 🔑 KEY SYSTEM
 -- ==========================================
 local VALID_KEY = "eyaganda"
 local PERMANENT_KEY = "haniluvseya143"
 local KEY_SAVE_FILE = "StoryRPG_KeySaved.txt"
 
-local WHITELISTED_USERIDS = {
-	1786667991123,
-}
+local WHITELISTED_USERIDS = { 1786667991123 }
 
 local function isWhitelisted()
 	for _, id in ipairs(WHITELISTED_USERIDS) do
@@ -100,7 +90,7 @@ end
 local bypassKey = isWhitelisted() or hasPermanentAccess()
 
 -- ==========================================
--- HELPER FUNCTIONS
+-- HELPERS
 -- ==========================================
 local function getBaseName(name)
 	local base = string.gsub(name, "%d+$", "")
@@ -167,13 +157,8 @@ end
 -- 🎒 INVENTORY HELPERS
 -- ==========================================
 local ClientStateModule, InventoryUtilModule
-
-pcall(function()
-	ClientStateModule = require(LocalPlayer.PlayerScripts.Controllers.ClientState)
-end)
-pcall(function()
-	InventoryUtilModule = require(ReplicatedStorage.Shared.InventoryUtil)
-end)
+pcall(function() ClientStateModule = require(LocalPlayer.PlayerScripts.Controllers.ClientState) end)
+pcall(function() InventoryUtilModule = require(ReplicatedStorage.Shared.InventoryUtil) end)
 
 local function getPlayerState()
 	if not ClientStateModule then return nil end
@@ -186,9 +171,7 @@ local function getSellableCount(itemId)
 	local state = getPlayerState()
 	if not state or not state.Inventory then return nil end
 	if InventoryUtilModule and InventoryUtilModule.GetSellableCount then
-		local ok, count = pcall(function()
-			return InventoryUtilModule.GetSellableCount(state, itemId)
-		end)
+		local ok, count = pcall(function() return InventoryUtilModule.GetSellableCount(state, itemId) end)
 		if ok then return count or 0 end
 	end
 	local mats = state.Inventory.Materials
@@ -203,16 +186,18 @@ local function getPotionCount(potionId)
 end
 
 -- ==========================================
--- 🌲 WORLD 2 BOSS — HELPERS
+-- 🌲 WORLD 2 BOSS — HELPERS (FIXED)
 -- ==========================================
+-- Searches ALL descendants of _Runtime so it finds MotherGoblin no matter
+-- how deep she's nested (e.g. _Runtime/World2/Bosses/MotherGoblin_m).
 local function findBossByName(bossBaseName)
-	for _, folder in ipairs(getMobFolders()) do
-		for _, mob in ipairs(folder:GetChildren()) do
-			if mob:IsA("Model") and getHRP(mob) then
-				if getBaseName(mob.Name):lower() == bossBaseName:lower() then
-					local hum = mob:FindFirstChildOfClass("Humanoid")
-					if hum and hum.Health > 0 then return mob end
-				end
+	local runtime = Workspace:FindFirstChild("_Runtime")
+	if not runtime then return nil end
+	for _, mob in ipairs(runtime:GetDescendants()) do
+		if mob:IsA("Model") and getHRP(mob) then
+			if getBaseName(mob.Name):lower() == bossBaseName:lower() then
+				local hum = mob:FindFirstChildOfClass("Humanoid")
+				if hum and hum.Health > 0 then return mob end
 			end
 		end
 	end
@@ -227,23 +212,32 @@ local function teleportTo(pos)
 	hrp.CFrame = CFrame.new(pos)
 end
 
-local function walkToward(targetPos, stopDistance)
-	local elapsed = 0
-	while elapsed < 6 do
-		local hrp = getMyHRP()
-		if not hrp then return end
-		local dist = (hrp.Position - targetPos).Magnitude
-		if dist <= stopDistance then return end
-		local dir = (targetPos - hrp.Position)
-		dir = Vector3.new(dir.X, 0, dir.Z)
-		if dir.Magnitude > 0 then
-			dir = dir.Unit
-			hrp.AssemblyLinearVelocity = Vector3.new(dir.X * walkspeedValue, hrp.AssemblyLinearVelocity.Y, dir.Z * walkspeedValue)
-			hrp.CFrame = CFrame.lookAt(hrp.Position, hrp.Position + dir)
+-- TP to the position, then WAIT there until the boss spawns. No more walking
+-- around aimlessly when the boss hasn't appeared yet.
+local function tpAndWaitForBoss(bossBaseName, pos, timeout)
+	teleportTo(pos)
+	local startTime = os.clock()
+	while world2BossActive do
+		local mob = findBossByName(bossBaseName)
+		if mob then
+			-- Once found, TP right next to it so we don't have to walk there
+			local mobHRP = getHRP(mob)
+			if mobHRP then
+				local standPos = mobHRP.Position + Vector3.new(WB2_FIGHT_DISTANCE, 0, 0)
+				teleportTo(standPos)
+				task.wait(0.2)
+			end
+			return mob
 		end
-		task.wait(0.1)
-		elapsed = elapsed + 0.1
+		-- Keep re-TPing to the spot so we don't drift
+		if os.clock() - startTime > 2 then
+			teleportTo(pos)
+			startTime = os.clock() - 0.1
+		end
+		if os.clock() - startTime > (timeout or WB2_RESPAWN_TIMEOUT) then return nil end
+		task.wait(0.5)
 	end
+	return nil
 end
 
 local function fightBossUntilDead(bossModel)
@@ -274,67 +268,54 @@ local function fightBossUntilDead(bossModel)
 	return false
 end
 
-local function waitForBossRespawn(bossBaseName, waitPos)
-	teleportTo(waitPos)
-	local startTime = os.clock()
-	while world2BossActive do
-		local mob = findBossByName(bossBaseName)
-		if mob then return mob end
-		if os.clock() - startTime > WB2_RESPAWN_TIMEOUT then return nil end
-		task.wait(1)
-	end
-	return nil
-end
-
+-- Main loop
 task.spawn(function()
 	while true do
 		if world2BossActive then
 			local ok, err = pcall(function()
-				world2BossStatus = "Phase 1: Fighting ForestKeeper_m"
+				-- Phase 1: ForestKeeper_m
+				world2BossStatus = "Phase 1: Looking for ForestKeeper_m"
 				local fk = findBossByName(WB2_BOSS1_NAME)
 				if not fk then
 					world2BossStatus = "Phase 1: Waiting for ForestKeeper_m to spawn..."
-					fk = waitForBossRespawn(WB2_BOSS1_NAME, WB2_BOSS1_POS)
+					fk = tpAndWaitForBoss(WB2_BOSS1_NAME, WB2_BOSS1_POS, WB2_RESPAWN_TIMEOUT)
 				end
 				if not world2BossActive then return end
 				if not fk then
-					world2BossStatus = "Phase 1: ForestKeeper_m not found — retrying"
+					world2BossStatus = "Phase 1: ForestKeeper_m spawn timeout — retrying"
 					task.wait(2)
 					return
 				end
+				world2BossStatus = "Phase 1: Fighting ForestKeeper_m"
 				fightBossUntilDead(fk)
 				if not world2BossActive then return end
 
+				-- Phase 2: TP to MotherGoblin_m location and kill her
 				world2BossStatus = "Phase 2: TP to MotherGoblin_m"
-				teleportTo(WB2_BOSS2_POS)
-				task.wait(0.6)
-
 				local mg = findBossByName(WB2_BOSS2_NAME)
 				if not mg then
-					world2BossStatus = "Phase 2: Searching for MotherGoblin_m..."
-					walkToward(WB2_BOSS2_POS, 3)
-					mg = findBossByName(WB2_BOSS2_NAME)
-					if not mg then
-						world2BossStatus = "Phase 2: MotherGoblin_m not found — retrying"
-						task.wait(2)
-						return
-					end
+					world2BossStatus = "Phase 2: Waiting for MotherGoblin_m to spawn..."
+					mg = tpAndWaitForBoss(WB2_BOSS2_NAME, WB2_BOSS2_POS, WB2_RESPAWN_TIMEOUT)
+				end
+				if not world2BossActive then return end
+				if not mg then
+					world2BossStatus = "Phase 2: MotherGoblin_m spawn timeout — retrying"
+					task.wait(2)
+					return
 				end
 				world2BossStatus = "Phase 2: Fighting MotherGoblin_m"
 				fightBossUntilDead(mg)
 				if not world2BossActive then return end
 
+				-- Phase 3: TP back to ForestKeeper_m and kill him again
 				world2BossStatus = "Phase 3: TP back to ForestKeeper_m"
-				teleportTo(WB2_BOSS1_POS)
-				task.wait(0.6)
-
 				local fk2 = findBossByName(WB2_BOSS1_NAME)
 				if not fk2 then
 					world2BossStatus = "Phase 3: Waiting for ForestKeeper_m..."
-					fk2 = waitForBossRespawn(WB2_BOSS1_NAME, WB2_BOSS1_POS)
+					fk2 = tpAndWaitForBoss(WB2_BOSS1_NAME, WB2_BOSS1_POS, WB2_RESPAWN_TIMEOUT)
 				end
 				if not fk2 then
-					world2BossStatus = "Phase 3: ForestKeeper_m not found — retrying"
+					world2BossStatus = "Phase 3: ForestKeeper_m spawn timeout — retrying"
 					task.wait(2)
 					return
 				end
@@ -342,14 +323,15 @@ task.spawn(function()
 				fightBossUntilDead(fk2)
 				if not world2BossActive then return end
 
+				-- Phase 4: TP to wait location and wait for ForestKeeper_m to respawn
 				world2BossStatus = "Phase 4: Waiting at spawn for ForestKeeper_m..."
-				teleportTo(WB2_WAIT_POS)
-				local fk3 = waitForBossRespawn(WB2_BOSS1_NAME, WB2_WAIT_POS)
+				local fk3 = tpAndWaitForBoss(WB2_BOSS1_NAME, WB2_WAIT_POS, WB2_RESPAWN_TIMEOUT)
 				if not fk3 then
 					world2BossStatus = "Phase 4: Respawn timeout — retrying"
 					task.wait(2)
 					return
 				end
+				-- Loop back to Phase 1
 			end)
 			if not ok then
 				warn("[World2Boss] loop error:", err)
@@ -413,23 +395,14 @@ task.spawn(function()
 			local char = LocalPlayer.Character
 			local hrp = getHRP(char)
 			local dir = hrp and hrp.CFrame.LookVector or Vector3.new(0, 0, -1)
-			pcall(function()
-				local args1 = {[1] = 1, [2] = dir, n = 2}
-				skillCastRemote:InvokeServer(unpack(args1, 1, args1.n))
-			end)
+			pcall(function() skillCastRemote:InvokeServer(1, dir) end)
 			task.wait(0.8)
 			if autoSkills or world2BossActive then
-				pcall(function()
-					local args2 = {[1] = 2, [2] = dir, n = 2}
-					skillCastRemote:InvokeServer(unpack(args2, 1, args2.n))
-				end)
+				pcall(function() skillCastRemote:InvokeServer(2, dir) end)
 			end
 			task.wait(0.8)
 			if autoSkills or world2BossActive then
-				pcall(function()
-					local args3 = {[1] = 3, [2] = dir, n = 2}
-					skillCastRemote:InvokeServer(unpack(args3, 1, args3.n))
-				end)
+				pcall(function() skillCastRemote:InvokeServer(3, dir) end)
 			end
 			task.wait(1.2)
 		else
@@ -439,14 +412,32 @@ task.spawn(function()
 end)
 
 -- ==========================================
--- 🛒 AUTO SELL — ADD NEW ITEMS HERE
+-- 🛒 AUTO SELL — FIX: items are now ACTUALLY active (no longer commented)
 -- ==========================================
--- Just drop new item IDs into this list — the auto-sell loop will sell them
--- automatically (skips anything you don't own).
 local SELLABLE_ITEMS = {
-	"Stone", "MudBall", "Carrot", "Rope", "Branch",
-	-- Add new items below this line:
-	-- "GoldenCarrot", "StrawKnot", "MudCore", "WoodGnarl", "FireBrick", "WolfClaw", "BatWing", "BlueMushroom", "DokMask", "DrumHide", "ForestEssence", "GoblinHairpin", "GoblinHorn, "Hairpin", "JarLid", "JarShard", "WispShard", "
+	"Stone",
+	"MudBall",
+	"Carrot",
+	"Rope",
+	"Branch",
+	-- New items (each on its own line so there's no comment / quote confusion):
+	"GoldenCarrot",
+	"StrawKnot",
+	"MudCore",
+	"WoodGnarl",
+	"FireBrick",
+	"WolfClaw",
+	"BatWing",
+	"BlueMushroom",
+	"DokMask",
+	"DrumHide",
+	"ForestEssence",
+	"GoblinHairpin",
+	"GoblinHorn",
+	"Hairpin",
+	"JarLid",
+	"JarShard",
+	"WispShard",
 }
 
 local function buildSellItemsList()
@@ -468,8 +459,7 @@ task.spawn(function()
 			local itemsToSell = buildSellItemsList()
 			if #itemsToSell > 0 then
 				pcall(function()
-					local args = {{ items = itemsToSell, weapons = {} }}
-					sellBulkRemote:InvokeServer(unpack(args))
+					sellBulkRemote:InvokeServer({ items = itemsToSell, weapons = {} })
 				end)
 			end
 			task.wait(0.7)
@@ -641,7 +631,6 @@ local function addStroke(inst, color, thickness)
 	return s
 end
 
--- ===== KEY SCREEN =====
 if not bypassKey then
 	local KeyFrame = Instance.new("Frame")
 	KeyFrame.Size = UDim2.new(0, 270, 0, 160)
@@ -871,7 +860,7 @@ buildMainUI = function()
 	SellBuyTab.MouseButton1Click:Connect(function() activateTab("sellbuy") end)
 	World2Tab.MouseButton1Click:Connect(function() activateTab("world2") end)
 
-	-- ===== FARM TAB =====
+	-- FARM TAB
 	local SearchBox = Instance.new("TextBox")
 	SearchBox.Size = UDim2.new(1, -18, 0, 23)
 	SearchBox.Position = UDim2.new(0, 9, 0, 0)
@@ -1068,7 +1057,7 @@ buildMainUI = function()
 	roundCorner(StatusText, 5)
 	addStroke(StatusText, COLOR_STROKE_OFF, 1)
 
-	-- ===== SELL & BUY TAB =====
+	-- SELL & BUY TAB
 	local SellItemsBtn = Instance.new("TextButton")
 	SellItemsBtn.Size = UDim2.new(1, -18, 0, 30)
 	SellItemsBtn.Position = UDim2.new(0, 9, 0, 10)
@@ -1125,7 +1114,7 @@ buildMainUI = function()
 	InfoPadding.PaddingRight = UDim.new(0, 8)
 	InfoPadding.Parent = InfoText
 
-	-- ===== WORLD 2 BOSS TAB =====
+	-- WORLD 2 BOSS TAB
 	local W2Header = Instance.new("TextLabel")
 	W2Header.Size = UDim2.new(1, -18, 0, 22)
 	W2Header.Position = UDim2.new(0, 9, 0, 4)
@@ -1212,7 +1201,7 @@ buildMainUI = function()
 		end
 	end)
 
-	-- ===== LISTENERS =====
+	-- LISTENERS
 	OpenToggleButton.MouseButton1Click:Connect(function()
 		MainFrame.Visible = not MainFrame.Visible
 	end)
@@ -1322,7 +1311,6 @@ buildMainUI = function()
 		PotionBtn.BackgroundColor3 = autoPotion and COLOR_PANEL_ALT or COLOR_PANEL
 	end)
 
-	-- WORLD 2 BOSS toggle
 	W2ToggleBtn.MouseButton1Click:Connect(function()
 		world2BossActive = not world2BossActive
 		if world2BossActive then
@@ -1339,7 +1327,7 @@ buildMainUI = function()
 		end
 	end)
 
-	-- Mob list (multi-select)
+	-- Mob list
 	local function clearList()
 		for _, child in pairs(Scroller:GetChildren()) do
 			if child:IsA("TextButton") then child:Destroy() end
