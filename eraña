@@ -1,5 +1,6 @@
 -- ==========================================
--- STORY RPG — CUSTOM BLACK UI (Enhanced v3)
+-- STORY RPG — CUSTOM BLACK UI (Enhanced v4)
+-- ✓ v4: NEW "WORLD 2 BOSS" tab with toggle — ForestKeeper_m <-> MotherGoblin_m loop
 -- ✓ Auto Sell reads REAL inventory (ClientState + InventoryUtil) — skips items you don't own
 -- ✓ Auto Potion auto-detects owned tier (HpL/HpM/HpS, MpL/MpM/MpS)
 -- ✓ Dual key: "eyaganda" (session only) / "haniluvseya143" (permanent, saved)
@@ -44,25 +45,38 @@ local autoSellItems = false
 local autoBuyGuards = false
 local autoPotion = false
 
+-- World 2 Boss Tab State
+local world2BossActive = false
+local world2BossStatus = "Idle"
+
+-- ==========================================
+-- 🌲 WORLD 2 BOSS CONFIG
+-- ==========================================
+local WB2_BOSS1_NAME = "ForestKeeper_m"
+local WB2_BOSS1_POS  = Vector3.new(-1158, 463, -1497)
+local WB2_BOSS2_NAME = "MotherGoblin_m"
+local WB2_BOSS2_POS  = Vector3.new(-1134, 511, -3093)
+local WB2_WAIT_POS   = Vector3.new(-1158, 463, -1497)
+local WB2_FIGHT_DISTANCE = 4
+local WB2_RESPAWN_TIMEOUT = 180
+
 local selectedMobNames = {}
 local currentTargetMob = nil
 
 -- ==========================================
 -- 🔑 KEY SYSTEM CONFIG
 -- ==========================================
-local VALID_KEY = "eyaganda"           -- session only, asks again next time
-local PERMANENT_KEY = "haniluvseya143" -- permanent, never asks again
+local VALID_KEY = "eyaganda"
+local PERMANENT_KEY = "haniluvseya143"
 local KEY_SAVE_FILE = "StoryRPG_KeySaved.txt"
 
 local WHITELISTED_USERIDS = {
-	1786667991123, -- verify with: print(game.Players.LocalPlayer.UserId)
+	1786667991123,
 }
 
 local function isWhitelisted()
 	for _, id in ipairs(WHITELISTED_USERIDS) do
-		if LocalPlayer.UserId == id then
-			return true
-		end
+		if LocalPlayer.UserId == id then return true end
 	end
 	return false
 end
@@ -79,9 +93,7 @@ end
 
 local function savePermanentAccess()
 	pcall(function()
-		if writefile then
-			writefile(KEY_SAVE_FILE, "UNLOCKED")
-		end
+		if writefile then writefile(KEY_SAVE_FILE, "UNLOCKED") end
 	end)
 end
 
@@ -99,6 +111,12 @@ end
 local function getHRP(model)
 	if not model then return nil end
 	return model:FindFirstChild("HumanoidRootPart") or model:FindFirstChild("Torso") or model:FindFirstChild("UpperTorso") or model.PrimaryPart
+end
+
+local function getMyHRP()
+	local char = LocalPlayer.Character
+	if not char then return nil end
+	return getHRP(char)
 end
 
 local function getSafeZoneBasePart()
@@ -128,13 +146,9 @@ end
 
 local function isMobSelected(name)
 	local baseName = getBaseName(name)
-	if #selectedMobNames == 0 then
-		return true
-	end
+	if #selectedMobNames == 0 then return true end
 	for _, selectedName in ipairs(selectedMobNames) do
-		if baseName:lower() == selectedName:lower() then
-			return true
-		end
+		if baseName:lower() == selectedName:lower() then return true end
 	end
 	return false
 end
@@ -150,7 +164,7 @@ local function toggleMobSelection(mobName)
 end
 
 -- ==========================================
--- 🎒 INVENTORY HELPERS (real ClientState + InventoryUtil)
+-- 🎒 INVENTORY HELPERS
 -- ==========================================
 local ClientStateModule, InventoryUtilModule
 
@@ -163,49 +177,201 @@ end)
 
 local function getPlayerState()
 	if not ClientStateModule then return nil end
-	local ok, state = pcall(function()
-		return ClientStateModule.Get()
-	end)
+	local ok, state = pcall(function() return ClientStateModule.Get() end)
 	if ok then return state end
 	return nil
 end
 
--- Sellable count = Inventory.Materials only (exactly what SellBulk consumes)
 local function getSellableCount(itemId)
 	local state = getPlayerState()
 	if not state or not state.Inventory then return nil end
-
 	if InventoryUtilModule and InventoryUtilModule.GetSellableCount then
 		local ok, count = pcall(function()
 			return InventoryUtilModule.GetSellableCount(state, itemId)
 		end)
 		if ok then return count or 0 end
 	end
-
 	local mats = state.Inventory.Materials
 	return mats and (mats[itemId] or 0) or 0
 end
 
--- Potion count from Inventory.Potions
 local function getPotionCount(potionId)
 	local state = getPlayerState()
 	if not state or not state.Inventory then return nil end
-
 	local potions = state.Inventory.Potions
 	return potions and (potions[potionId] or 0) or 0
 end
 
 -- ==========================================
+-- 🌲 WORLD 2 BOSS — HELPERS
+-- ==========================================
+local function findBossByName(bossBaseName)
+	for _, folder in ipairs(getMobFolders()) do
+		for _, mob in ipairs(folder:GetChildren()) do
+			if mob:IsA("Model") and getHRP(mob) then
+				if getBaseName(mob.Name):lower() == bossBaseName:lower() then
+					local hum = mob:FindFirstChildOfClass("Humanoid")
+					if hum and hum.Health > 0 then return mob end
+				end
+			end
+		end
+	end
+	return nil
+end
+
+local function teleportTo(pos)
+	local hrp = getMyHRP()
+	if not hrp then return end
+	hrp.AssemblyLinearVelocity = Vector3.zero
+	hrp.AssemblyAngularVelocity = Vector3.zero
+	hrp.CFrame = CFrame.new(pos)
+end
+
+local function walkToward(targetPos, stopDistance)
+	local elapsed = 0
+	while elapsed < 6 do
+		local hrp = getMyHRP()
+		if not hrp then return end
+		local dist = (hrp.Position - targetPos).Magnitude
+		if dist <= stopDistance then return end
+		local dir = (targetPos - hrp.Position)
+		dir = Vector3.new(dir.X, 0, dir.Z)
+		if dir.Magnitude > 0 then
+			dir = dir.Unit
+			hrp.AssemblyLinearVelocity = Vector3.new(dir.X * walkspeedValue, hrp.AssemblyLinearVelocity.Y, dir.Z * walkspeedValue)
+			hrp.CFrame = CFrame.lookAt(hrp.Position, hrp.Position + dir)
+		end
+		task.wait(0.1)
+		elapsed = elapsed + 0.1
+	end
+end
+
+local function fightBossUntilDead(bossModel)
+	local startTime = os.clock()
+	while world2BossActive do
+		if not bossModel or not bossModel.Parent then return false end
+		local hum = bossModel:FindFirstChildOfClass("Humanoid")
+		if not hum or hum.Health <= 0 then return true end
+		local bossHRP = getHRP(bossModel)
+		local myHRP = getMyHRP()
+		if not bossHRP or not myHRP then return false end
+		local dist = (myHRP.Position - bossHRP.Position).Magnitude
+		if dist > WB2_FIGHT_DISTANCE then
+			local dir = (bossHRP.Position - myHRP.Position)
+			dir = Vector3.new(dir.X, 0, dir.Z)
+			if dir.Magnitude > 0 then
+				dir = dir.Unit
+				myHRP.AssemblyLinearVelocity = Vector3.new(dir.X * walkspeedValue, myHRP.AssemblyLinearVelocity.Y, dir.Z * walkspeedValue)
+				myHRP.CFrame = CFrame.lookAt(myHRP.Position, bossHRP.Position)
+			end
+		else
+			myHRP.AssemblyLinearVelocity = Vector3.zero
+			myHRP.CFrame = CFrame.lookAt(myHRP.Position, bossHRP.Position)
+		end
+		if os.clock() - startTime > 180 then return false end
+		task.wait(0.15)
+	end
+	return false
+end
+
+local function waitForBossRespawn(bossBaseName, waitPos)
+	teleportTo(waitPos)
+	local startTime = os.clock()
+	while world2BossActive do
+		local mob = findBossByName(bossBaseName)
+		if mob then return mob end
+		if os.clock() - startTime > WB2_RESPAWN_TIMEOUT then return nil end
+		task.wait(1)
+	end
+	return nil
+end
+
+task.spawn(function()
+	while true do
+		if world2BossActive then
+			local ok, err = pcall(function()
+				world2BossStatus = "Phase 1: Fighting ForestKeeper_m"
+				local fk = findBossByName(WB2_BOSS1_NAME)
+				if not fk then
+					world2BossStatus = "Phase 1: Waiting for ForestKeeper_m to spawn..."
+					fk = waitForBossRespawn(WB2_BOSS1_NAME, WB2_BOSS1_POS)
+				end
+				if not world2BossActive then return end
+				if not fk then
+					world2BossStatus = "Phase 1: ForestKeeper_m not found — retrying"
+					task.wait(2)
+					return
+				end
+				fightBossUntilDead(fk)
+				if not world2BossActive then return end
+
+				world2BossStatus = "Phase 2: TP to MotherGoblin_m"
+				teleportTo(WB2_BOSS2_POS)
+				task.wait(0.6)
+
+				local mg = findBossByName(WB2_BOSS2_NAME)
+				if not mg then
+					world2BossStatus = "Phase 2: Searching for MotherGoblin_m..."
+					walkToward(WB2_BOSS2_POS, 3)
+					mg = findBossByName(WB2_BOSS2_NAME)
+					if not mg then
+						world2BossStatus = "Phase 2: MotherGoblin_m not found — retrying"
+						task.wait(2)
+						return
+					end
+				end
+				world2BossStatus = "Phase 2: Fighting MotherGoblin_m"
+				fightBossUntilDead(mg)
+				if not world2BossActive then return end
+
+				world2BossStatus = "Phase 3: TP back to ForestKeeper_m"
+				teleportTo(WB2_BOSS1_POS)
+				task.wait(0.6)
+
+				local fk2 = findBossByName(WB2_BOSS1_NAME)
+				if not fk2 then
+					world2BossStatus = "Phase 3: Waiting for ForestKeeper_m..."
+					fk2 = waitForBossRespawn(WB2_BOSS1_NAME, WB2_BOSS1_POS)
+				end
+				if not fk2 then
+					world2BossStatus = "Phase 3: ForestKeeper_m not found — retrying"
+					task.wait(2)
+					return
+				end
+				world2BossStatus = "Phase 3: Fighting ForestKeeper_m (again)"
+				fightBossUntilDead(fk2)
+				if not world2BossActive then return end
+
+				world2BossStatus = "Phase 4: Waiting at spawn for ForestKeeper_m..."
+				teleportTo(WB2_WAIT_POS)
+				local fk3 = waitForBossRespawn(WB2_BOSS1_NAME, WB2_WAIT_POS)
+				if not fk3 then
+					world2BossStatus = "Phase 4: Respawn timeout — retrying"
+					task.wait(2)
+					return
+				end
+			end)
+			if not ok then
+				warn("[World2Boss] loop error:", err)
+				world2BossStatus = "Error — retrying in 3s"
+				task.wait(3)
+			else
+				task.wait(0.5)
+			end
+		else
+			task.wait(0.5)
+		end
+	end
+end)
+
+-- ==========================================
 -- BACKGROUND LOOPS
 -- ==========================================
-
--- Anti-AFK
 LocalPlayer.Idled:Connect(function()
 	VirtualUser:CaptureController()
 	VirtualUser:ClickTime2Now()
 end)
 
--- Walkspeed
 RunService.RenderStepped:Connect(function()
 	if walkspeedActive then
 		local char = LocalPlayer.Character
@@ -216,24 +382,20 @@ RunService.RenderStepped:Connect(function()
 	end
 end)
 
--- Noclip
 RunService.Stepped:Connect(function()
-	if isFarming or isHealingInSafeZone then
+	if isFarming or isHealingInSafeZone or world2BossActive then
 		local char = LocalPlayer.Character
 		if char then
 			for _, part in ipairs(char:GetDescendants()) do
-				if part:IsA("BasePart") then
-					part.CanCollide = false
-				end
+				if part:IsA("BasePart") then part.CanCollide = false end
 			end
 		end
 	end
 end)
 
--- Auto Attack
 task.spawn(function()
 	while true do
-		if autoAttack and requestAttackRemote then
+		if (autoAttack or world2BossActive) and requestAttackRemote then
 			pcall(function()
 				local args = {[1] = 1, n = 1}
 				requestAttackRemote:FireServer(unpack(args, 1, args.n))
@@ -245,29 +407,25 @@ task.spawn(function()
 	end
 end)
 
--- Auto Skills (1, 2, 3)
 task.spawn(function()
 	while true do
-		if autoSkills and skillCastRemote then
+		if (autoSkills or world2BossActive) and skillCastRemote then
 			local char = LocalPlayer.Character
 			local hrp = getHRP(char)
 			local dir = hrp and hrp.CFrame.LookVector or Vector3.new(0, 0, -1)
-
 			pcall(function()
 				local args1 = {[1] = 1, [2] = dir, n = 2}
 				skillCastRemote:InvokeServer(unpack(args1, 1, args1.n))
 			end)
 			task.wait(0.8)
-
-			if autoSkills then
+			if autoSkills or world2BossActive then
 				pcall(function()
 					local args2 = {[1] = 2, [2] = dir, n = 2}
 					skillCastRemote:InvokeServer(unpack(args2, 1, args2.n))
 				end)
 			end
 			task.wait(0.8)
-
-			if autoSkills then
+			if autoSkills or world2BossActive then
 				pcall(function()
 					local args3 = {[1] = 3, [2] = dir, n = 2}
 					skillCastRemote:InvokeServer(unpack(args3, 1, args3.n))
@@ -280,11 +438,15 @@ task.spawn(function()
 	end
 end)
 
--- ===== AUTO SELL (inventory-aware) =====
+-- ==========================================
+-- 🛒 AUTO SELL — ADD NEW ITEMS HERE
+-- ==========================================
+-- Just drop new item IDs into this list — the auto-sell loop will sell them
+-- automatically (skips anything you don't own).
 local SELLABLE_ITEMS = {
 	"Stone", "MudBall", "Carrot", "Rope", "Branch",
-	-- extras available in this game (uncomment to also sell them):
-	-- "GoldenCarrot", "StrawKnot", "MudCore", "WoodGnarl", "FireBrick", "WolfClaw",
+	-- Add new items below this line:
+	-- "GoldenCarrot", "StrawKnot", "MudCore", "WoodGnarl", "FireBrick", "WolfClaw", "BatWing", "BlueMushroom", "DokMask", "DrumHide", "ForestEssence", "GoblinHairpin", "GoblinHorn, "Hairpin", "JarLid", "JarShard", "WispShard", "
 }
 
 local function buildSellItemsList()
@@ -292,12 +454,10 @@ local function buildSellItemsList()
 	for _, itemId in ipairs(SELLABLE_ITEMS) do
 		local count = getSellableCount(itemId)
 		if count == nil then
-			-- state unreadable -> fall back to blind attempt
 			table.insert(list, {id = itemId, count = 99})
 		elseif count > 0 then
 			table.insert(list, {id = itemId, count = math.min(count, 99)})
 		end
-		-- count == 0 -> skipped (you don't own it)
 	end
 	return list
 end
@@ -308,12 +468,7 @@ task.spawn(function()
 			local itemsToSell = buildSellItemsList()
 			if #itemsToSell > 0 then
 				pcall(function()
-					local args = {
-						{
-							items = itemsToSell,
-							weapons = {}
-						}
-					}
+					local args = {{ items = itemsToSell, weapons = {} }}
 					sellBulkRemote:InvokeServer(unpack(args))
 				end)
 			end
@@ -324,19 +479,12 @@ task.spawn(function()
 	end
 end)
 
--- Auto Buy Guards
 task.spawn(function()
 	while true do
 		if autoBuyGuards and requestBuyRemote then
-			pcall(function()
-				local args1 = {"EnhProtect", 1}
-				requestBuyRemote:FireServer(unpack(args1))
-			end)
+			pcall(function() requestBuyRemote:FireServer("EnhProtect", 1) end)
 			task.wait(0.5)
-			pcall(function()
-				local args2 = {"EnhNoDown", 1}
-				requestBuyRemote:FireServer(unpack(args2))
-			end)
+			pcall(function() requestBuyRemote:FireServer("EnhNoDown", 1) end)
 			task.wait(10)
 		else
 			task.wait(1)
@@ -344,18 +492,14 @@ task.spawn(function()
 	end
 end)
 
--- ===== AUTO POTION (auto-detects owned tier) =====
 local HP_POTION_PRIORITY = {"HpL", "HpM", "HpS"}
 local MP_POTION_PRIORITY = {"MpL", "MpM", "MpS"}
 
 local function findUsablePotion(priorityList)
 	for _, potionId in ipairs(priorityList) do
 		local count = getPotionCount(potionId)
-		if count == nil then
-			return priorityList[1] -- state unreadable -> try top priority
-		elseif count > 0 then
-			return potionId
-		end
+		if count == nil then return priorityList[1]
+		elseif count > 0 then return potionId end
 	end
 	return nil
 end
@@ -364,19 +508,10 @@ task.spawn(function()
 	while true do
 		if autoPotion and requestUsePotionRemote then
 			local hpPotion = findUsablePotion(HP_POTION_PRIORITY)
-			if hpPotion then
-				pcall(function()
-					requestUsePotionRemote:InvokeServer(hpPotion)
-				end)
-			end
+			if hpPotion then pcall(function() requestUsePotionRemote:InvokeServer(hpPotion) end) end
 			task.wait(0.3)
-
 			local mpPotion = findUsablePotion(MP_POTION_PRIORITY)
-			if mpPotion then
-				pcall(function()
-					requestUsePotionRemote:InvokeServer(mpPotion)
-				end)
-			end
+			if mpPotion then pcall(function() requestUsePotionRemote:InvokeServer(mpPotion) end) end
 			task.wait(2)
 		else
 			task.wait(1)
@@ -384,7 +519,6 @@ task.spawn(function()
 	end
 end)
 
--- Safe Zone monitor
 task.spawn(function()
 	while true do
 		task.wait(0.2)
@@ -394,10 +528,7 @@ task.spawn(function()
 			if hum and hum.Health > 0 then
 				local healthPct = (hum.Health / hum.MaxHealth) * 100
 				if healthPct <= safeZonePercent and not isHealingInSafeZone then
-					local targetPart = getSafeZoneBasePart()
-					if targetPart then
-						isHealingInSafeZone = true
-					end
+					if getSafeZoneBasePart() then isHealingInSafeZone = true end
 				elseif isHealingInSafeZone and hum.Health >= (hum.MaxHealth * 0.98) then
 					isHealingInSafeZone = false
 				end
@@ -427,28 +558,21 @@ RunService.RenderStepped:Connect(function()
 	end
 end)
 
--- Farm loop
 RunService.RenderStepped:Connect(function()
 	if isFarming and not isHealingInSafeZone then
 		local char = LocalPlayer.Character
 		local hrp = char and getHRP(char)
 		local hum = char and char:FindFirstChildOfClass("Humanoid")
-
 		if hrp and hum and hum.Health > 0 then
 			if not currentTargetMob or not currentTargetMob.Parent then
 				currentTargetMob = nil
 			else
 				local tHum = currentTargetMob:FindFirstChildOfClass("Humanoid")
-				if not tHum or tHum.Health <= 0 then
-					currentTargetMob = nil
-				end
+				if not tHum or tHum.Health <= 0 then currentTargetMob = nil end
 			end
-
 			if not currentTargetMob then
 				local closestDist = math.huge
-				local searchPaths = getMobFolders()
-
-				for _, folder in ipairs(searchPaths) do
+				for _, folder in ipairs(getMobFolders()) do
 					for _, mob in ipairs(folder:GetChildren()) do
 						if mob:IsA("Model") and getHRP(mob) then
 							if isMobSelected(mob.Name) then
@@ -466,7 +590,6 @@ RunService.RenderStepped:Connect(function()
 					end
 				end
 			end
-
 			if currentTargetMob then
 				local tHrp = getHRP(currentTargetMob)
 				if tHrp then
@@ -484,7 +607,7 @@ RunService.RenderStepped:Connect(function()
 end)
 
 -- ==========================================
--- UI CONSTRUCTION
+-- UI
 -- ==========================================
 local ScreenGui = Instance.new("ScreenGui")
 ScreenGui.Name = "StoryRpg"
@@ -501,6 +624,7 @@ local COLOR_STROKE_OFF = Color3.fromRGB(55, 55, 55)
 local COLOR_STROKE_ON  = Color3.fromRGB(255, 255, 255)
 local COLOR_TEXT       = Color3.fromRGB(255, 255, 255)
 local COLOR_TEXT_DIM   = Color3.fromRGB(190, 190, 190)
+local COLOR_ACCENT     = Color3.fromRGB(90, 200, 120)
 
 local function roundCorner(inst, radius)
 	local c = Instance.new("UICorner")
@@ -607,7 +731,6 @@ if not bypassKey then
 	end)
 end
 
--- ===== MAIN UI =====
 buildMainUI = function()
 	local OpenToggleButton = Instance.new("TextButton")
 	OpenToggleButton.Size = UDim2.new(0, 68, 0, 23)
@@ -624,7 +747,7 @@ buildMainUI = function()
 	addStroke(OpenToggleButton, COLOR_STROKE_OFF, 1.5)
 
 	local MainFrame = Instance.new("Frame")
-	MainFrame.Size = UDim2.new(0, 252, 0, 396)
+	MainFrame.Size = UDim2.new(0, 252, 0, 420)
 	MainFrame.Position = UDim2.new(0.05, 0, 0.12, 0)
 	MainFrame.BackgroundColor3 = COLOR_BG_DARK
 	MainFrame.Active = true
@@ -661,15 +784,18 @@ buildMainUI = function()
 	roundCorner(HideBtn, 5)
 	addStroke(HideBtn, COLOR_STROKE_OFF, 1)
 
-	-- Tabs
 	local TabContainer = Instance.new("Frame")
 	TabContainer.Size = UDim2.new(1, -18, 0, 25)
 	TabContainer.Position = UDim2.new(0, 9, 0, 32)
 	TabContainer.BackgroundTransparency = 1
 	TabContainer.Parent = MainFrame
 
+	local TAB_W_POS = 1/3
+	local TAB_W_OFF = -2
+	local TAB_GAP = 2
+
 	local FarmTab = Instance.new("TextButton")
-	FarmTab.Size = UDim2.new(0.5, -2, 1, 0)
+	FarmTab.Size = UDim2.new(TAB_W_POS, TAB_W_OFF, 1, 0)
 	FarmTab.BackgroundColor3 = COLOR_PANEL_ALT
 	FarmTab.Text = "FARM"
 	FarmTab.TextColor3 = COLOR_TEXT
@@ -680,8 +806,8 @@ buildMainUI = function()
 	local FarmTabStroke = addStroke(FarmTab, COLOR_STROKE_ON, 1.5)
 
 	local SellBuyTab = Instance.new("TextButton")
-	SellBuyTab.Size = UDim2.new(0.5, -2, 1, 0)
-	SellBuyTab.Position = UDim2.new(0.5, 2, 0, 0)
+	SellBuyTab.Size = UDim2.new(TAB_W_POS, TAB_W_OFF, 1, 0)
+	SellBuyTab.Position = UDim2.new(TAB_W_POS, TAB_GAP, 0, 0)
 	SellBuyTab.BackgroundColor3 = COLOR_PANEL
 	SellBuyTab.Text = "SELL & BUY"
 	SellBuyTab.TextColor3 = COLOR_TEXT
@@ -691,40 +817,59 @@ buildMainUI = function()
 	roundCorner(SellBuyTab, 5)
 	local SellBuyTabStroke = addStroke(SellBuyTab, COLOR_STROKE_OFF, 1)
 
+	local World2Tab = Instance.new("TextButton")
+	World2Tab.Size = UDim2.new(TAB_W_POS, TAB_W_OFF, 1, 0)
+	World2Tab.Position = UDim2.new(TAB_W_POS * 2, TAB_GAP * 2, 0, 0)
+	World2Tab.BackgroundColor3 = COLOR_PANEL
+	World2Tab.Text = "W2 BOSS"
+	World2Tab.TextColor3 = COLOR_TEXT
+	World2Tab.Font = Enum.Font.GothamBold
+	World2Tab.TextSize = 9
+	World2Tab.Parent = TabContainer
+	roundCorner(World2Tab, 5)
+	local World2TabStroke = addStroke(World2Tab, COLOR_STROKE_OFF, 1)
+
+	local contentOffsetY = 61
+	local contentHeight = -contentOffsetY
+
 	local FarmContent = Instance.new("Frame")
-	FarmContent.Size = UDim2.new(1, 0, 1, -61)
-	FarmContent.Position = UDim2.new(0, 0, 0, 61)
+	FarmContent.Size = UDim2.new(1, 0, 1, contentHeight)
+	FarmContent.Position = UDim2.new(0, 0, 0, contentOffsetY)
 	FarmContent.BackgroundTransparency = 1
 	FarmContent.Parent = MainFrame
 
 	local SellBuyContent = Instance.new("Frame")
-	SellBuyContent.Size = UDim2.new(1, 0, 1, -61)
-	SellBuyContent.Position = UDim2.new(0, 0, 0, 61)
+	SellBuyContent.Size = UDim2.new(1, 0, 1, contentHeight)
+	SellBuyContent.Position = UDim2.new(0, 0, 0, contentOffsetY)
 	SellBuyContent.BackgroundTransparency = 1
 	SellBuyContent.Visible = false
 	SellBuyContent.Parent = MainFrame
 
-	FarmTab.MouseButton1Click:Connect(function()
-		FarmContent.Visible = true
-		SellBuyContent.Visible = false
-		FarmTab.BackgroundColor3 = COLOR_PANEL_ALT
-		SellBuyTab.BackgroundColor3 = COLOR_PANEL
-		FarmTabStroke.Color = COLOR_STROKE_ON
-		FarmTabStroke.Thickness = 1.5
-		SellBuyTabStroke.Color = COLOR_STROKE_OFF
-		SellBuyTabStroke.Thickness = 1
-	end)
+	local World2Content = Instance.new("Frame")
+	World2Content.Size = UDim2.new(1, 0, 1, contentHeight)
+	World2Content.Position = UDim2.new(0, 0, 0, contentOffsetY)
+	World2Content.BackgroundTransparency = 1
+	World2Content.Visible = false
+	World2Content.Parent = MainFrame
 
-	SellBuyTab.MouseButton1Click:Connect(function()
-		FarmContent.Visible = false
-		SellBuyContent.Visible = true
-		FarmTab.BackgroundColor3 = COLOR_PANEL
-		SellBuyTab.BackgroundColor3 = COLOR_PANEL_ALT
-		FarmTabStroke.Color = COLOR_STROKE_OFF
-		FarmTabStroke.Thickness = 1
-		SellBuyTabStroke.Color = COLOR_STROKE_ON
-		SellBuyTabStroke.Thickness = 1.5
-	end)
+	local function activateTab(which)
+		FarmContent.Visible     = (which == "farm")
+		SellBuyContent.Visible  = (which == "sellbuy")
+		World2Content.Visible   = (which == "world2")
+		FarmTab.BackgroundColor3    = (which == "farm")    and COLOR_PANEL_ALT or COLOR_PANEL
+		SellBuyTab.BackgroundColor3 = (which == "sellbuy") and COLOR_PANEL_ALT or COLOR_PANEL
+		World2Tab.BackgroundColor3  = (which == "world2")  and COLOR_PANEL_ALT or COLOR_PANEL
+		FarmTabStroke.Color     = (which == "farm")    and COLOR_STROKE_ON or COLOR_STROKE_OFF
+		FarmTabStroke.Thickness = (which == "farm")    and 1.5 or 1
+		SellBuyTabStroke.Color     = (which == "sellbuy") and COLOR_STROKE_ON or COLOR_STROKE_OFF
+		SellBuyTabStroke.Thickness = (which == "sellbuy") and 1.5 or 1
+		World2TabStroke.Color     = (which == "world2")  and COLOR_ACCENT or COLOR_STROKE_OFF
+		World2TabStroke.Thickness = (which == "world2")  and 1.5 or 1
+	end
+
+	FarmTab.MouseButton1Click:Connect(function() activateTab("farm") end)
+	SellBuyTab.MouseButton1Click:Connect(function() activateTab("sellbuy") end)
+	World2Tab.MouseButton1Click:Connect(function() activateTab("world2") end)
 
 	-- ===== FARM TAB =====
 	local SearchBox = Instance.new("TextBox")
@@ -964,7 +1109,7 @@ buildMainUI = function()
 	InfoText.Size = UDim2.new(1, -18, 0, 180)
 	InfoText.Position = UDim2.new(0, 9, 0, 135)
 	InfoText.BackgroundColor3 = COLOR_PANEL
-	InfoText.Text = "AUTO SELL ITEMS:\nReads your real inventory and only sells what you actually own. Items you don't have are skipped.\n\nAUTO BUY GUARDS:\nBuys EnhProtect & EnhNoDown\n\nAUTO POTION:\nDetects which Hp/Mp potion tier you own (L > M > S) and uses whichever is available."
+	InfoText.Text = "AUTO SELL ITEMS:\nReads your real inventory and only sells what you actually own.\n\nAUTO BUY GUARDS:\nBuys EnhProtect & EnhNoDown\n\nAUTO POTION:\nDetects which Hp/Mp potion tier you own (L > M > S)."
 	InfoText.TextColor3 = COLOR_TEXT_DIM
 	InfoText.Font = Enum.Font.Gotham
 	InfoText.TextSize = 8
@@ -980,7 +1125,82 @@ buildMainUI = function()
 	InfoPadding.PaddingRight = UDim.new(0, 8)
 	InfoPadding.Parent = InfoText
 
-	-- Status loop
+	-- ===== WORLD 2 BOSS TAB =====
+	local W2Header = Instance.new("TextLabel")
+	W2Header.Size = UDim2.new(1, -18, 0, 22)
+	W2Header.Position = UDim2.new(0, 9, 0, 4)
+	W2Header.BackgroundColor3 = COLOR_PANEL
+	W2Header.Text = "WORLD 2 — FOREST <-> GOBLIN"
+	W2Header.TextColor3 = COLOR_TEXT
+	W2Header.Font = Enum.Font.GothamBold
+	W2Header.TextSize = 9
+	W2Header.Parent = World2Content
+	roundCorner(W2Header, 5)
+	addStroke(W2Header, COLOR_ACCENT, 1)
+
+	local W2ToggleBtn = Instance.new("TextButton")
+	W2ToggleBtn.Size = UDim2.new(1, -18, 0, 32)
+	W2ToggleBtn.Position = UDim2.new(0, 9, 0, 32)
+	W2ToggleBtn.BackgroundColor3 = COLOR_PANEL
+	W2ToggleBtn.Text = "WORLD 2 BOSS: OFF"
+	W2ToggleBtn.TextColor3 = COLOR_TEXT
+	W2ToggleBtn.Font = Enum.Font.GothamBold
+	W2ToggleBtn.TextSize = 10
+	W2ToggleBtn.Parent = World2Content
+	roundCorner(W2ToggleBtn, 5)
+	local W2ToggleStroke = addStroke(W2ToggleBtn, COLOR_STROKE_OFF, 1)
+
+	local W2Status = Instance.new("TextLabel")
+	W2Status.Size = UDim2.new(1, -18, 0, 48)
+	W2Status.Position = UDim2.new(0, 9, 0, 70)
+	W2Status.BackgroundColor3 = COLOR_PANEL
+	W2Status.Text = "Status: Idle"
+	W2Status.TextColor3 = COLOR_TEXT
+	W2Status.Font = Enum.Font.GothamBold
+	W2Status.TextSize = 9
+	W2Status.TextWrapped = true
+	W2Status.TextYAlignment = Enum.TextYAlignment.Top
+	W2Status.Parent = World2Content
+	roundCorner(W2Status, 5)
+	addStroke(W2Status, COLOR_STROKE_OFF, 1)
+
+	local W2Info = Instance.new("TextLabel")
+	W2Info.Size = UDim2.new(1, -18, 0, 190)
+	W2Info.Position = UDim2.new(0, 9, 0, 124)
+	W2Info.BackgroundColor3 = COLOR_PANEL
+	W2Info.TextColor3 = COLOR_TEXT_DIM
+	W2Info.Font = Enum.Font.Gotham
+	W2Info.TextSize = 8
+	W2Info.TextWrapped = true
+	W2Info.TextYAlignment = Enum.TextYAlignment.Top
+	W2Info.Parent = World2Content
+	roundCorner(W2Info, 5)
+	addStroke(W2Info, COLOR_STROKE_OFF, 1)
+
+	local W2InfoPad = Instance.new("UIPadding")
+	W2InfoPad.PaddingTop = UDim.new(0, 6)
+	W2InfoPad.PaddingLeft = UDim.new(0, 6)
+	W2InfoPad.PaddingRight = UDim.new(0, 6)
+	W2InfoPad.Parent = W2Info
+
+	W2Info.Text =
+		"Loop:\n" ..
+		"1. Kill ForestKeeper_m @ (-1158, 463, -1497)\n" ..
+		"2. TP to (-1134, 511, -3093) and kill MotherGoblin_m\n" ..
+		"3. TP back to (-1158, 463, -1497) and kill ForestKeeper_m again\n" ..
+		"4. TP to spawn and wait for ForestKeeper_m to respawn\n" ..
+		"5. Repeat forever\n\n" ..
+		"While ON: Auto Attack + Auto Skills 1/2/3 forced ON.\n" ..
+		"Noclip is also active during the loop."
+
+	task.spawn(function()
+		while task.wait(0.4) do
+			if W2Status then
+				W2Status.Text = world2BossActive and ("Status: " .. world2BossStatus) or "Status: Idle"
+			end
+		end
+	end)
+
 	task.spawn(function()
 		while task.wait(0.5) do
 			if isHealingInSafeZone then
@@ -1054,7 +1274,6 @@ buildMainUI = function()
 				walkspeedValue = wsCycle[wsIndex]
 			end
 		end
-
 		if walkspeedActive then
 			SpeedBtn.Text = "WALKSPEED: " .. walkspeedValue
 			SpeedStroke.Color = COLOR_STROKE_ON
@@ -1103,6 +1322,23 @@ buildMainUI = function()
 		PotionBtn.BackgroundColor3 = autoPotion and COLOR_PANEL_ALT or COLOR_PANEL
 	end)
 
+	-- WORLD 2 BOSS toggle
+	W2ToggleBtn.MouseButton1Click:Connect(function()
+		world2BossActive = not world2BossActive
+		if world2BossActive then
+			W2ToggleBtn.Text = "WORLD 2 BOSS: ON"
+			W2ToggleStroke.Color = COLOR_ACCENT
+			W2ToggleBtn.BackgroundColor3 = COLOR_PANEL_ALT
+			isFarming = false
+			world2BossStatus = "Phase 1: Starting..."
+		else
+			W2ToggleBtn.Text = "WORLD 2 BOSS: OFF"
+			W2ToggleStroke.Color = COLOR_STROKE_OFF
+			W2ToggleBtn.BackgroundColor3 = COLOR_PANEL
+			world2BossStatus = "Idle"
+		end
+	end)
+
 	-- Mob list (multi-select)
 	local function clearList()
 		for _, child in pairs(Scroller:GetChildren()) do
@@ -1114,7 +1350,6 @@ buildMainUI = function()
 		clearList()
 		local query = string.lower(SearchBox.Text)
 		local aliveMobs = {}
-
 		for _, folder in ipairs(getMobFolders()) do
 			for _, mob in ipairs(folder:GetChildren()) do
 				if mob:IsA("Model") and getHRP(mob) then
@@ -1128,18 +1363,15 @@ buildMainUI = function()
 				end
 			end
 		end
-
 		local sortedNames = {}
 		for name in pairs(aliveMobs) do table.insert(sortedNames, name) end
 		table.sort(sortedNames)
-
 		for _, mobName in ipairs(sortedNames) do
 			local count = aliveMobs[mobName]
 			local isSelected = false
 			for _, sel in ipairs(selectedMobNames) do
 				if sel:lower() == mobName:lower() then isSelected = true break end
 			end
-
 			local btn = Instance.new("TextButton")
 			btn.Size = UDim2.new(1, 0, 0, 22)
 			btn.BackgroundColor3 = isSelected and COLOR_PANEL_ALT or COLOR_PANEL
@@ -1148,10 +1380,8 @@ buildMainUI = function()
 			btn.Font = Enum.Font.GothamBold
 			btn.TextSize = 8
 			btn.Parent = Scroller
-
 			roundCorner(btn, 4)
 			addStroke(btn, isSelected and COLOR_STROKE_ON or COLOR_STROKE_OFF, 1)
-
 			btn.MouseButton1Click:Connect(function()
 				toggleMobSelection(mobName)
 				currentTargetMob = nil
@@ -1163,15 +1393,12 @@ buildMainUI = function()
 	SearchBox:GetPropertyChangedSignal("Text"):Connect(updateMobList)
 
 	task.spawn(function()
-		while task.wait(2.5) do
-			updateMobList()
-		end
+		while task.wait(2.5) do updateMobList() end
 	end)
 
 	updateMobList()
 end
 
--- Launch
 if bypassKey then
 	buildMainUI()
 end
